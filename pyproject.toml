@@ -110,6 +110,7 @@ dependencies = [
     "textual==8.2.7",
     "textual-speedups==0.2.1",
     "tomli-w==1.2.0",
+    "tomlkit==0.14.0",
     "tree-sitter==0.25.2",
     "tree-sitter-bash==0.25.1",
     "truststore==0.10.4",
@@ -139,11 +140,13 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 include = ["vibe/"]
+artifacts = ["vibe/core/hooks/aether/skills/**"]
 
 
 [project.scripts]
 vibe = "vibe.cli.entrypoint:main"
 vibe-acp = "vibe.acp.entrypoint:main"
+vibe-aether = "vibe.core.hooks.aether.runner:main"
 
 
 [tool.uv]

@@ -121,8 +121,18 @@ export class ChatPanel {
           this._postMessage({ type: "assistantChunk", text: chunk.content.text });
         } else if (chunk.sessionUpdate === "tool_call") {
           this._postMessage({
-            type: "toolCall",
-            text: JSON.stringify(chunk, null, 2),
+            type: "toolCallStart",
+            toolCallId: chunk.toolCallId,
+            title: chunk.title,
+            kind: chunk.kind,
+            rawInput: chunk.rawInput,
+          });
+        } else if (chunk.sessionUpdate === "tool_call_update") {
+          this._postMessage({
+            type: "toolCallUpdate",
+            toolCallId: chunk.toolCallId,
+            status: chunk.status,
+            rawOutput: chunk.rawOutput,
           });
         }
       });

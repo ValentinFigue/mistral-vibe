@@ -134,20 +134,103 @@
       margin: 8px 0;
     }
 
-    .message.tool {
+    /* Tool call cards */
+    .tool-call-card {
       align-self: flex-start;
-      background: transparent;
-      border: 1px solid var(--vscode-panel-border);
-      font-family: var(--vscode-editor-font-family);
-      font-size: 11px;
-      color: var(--vscode-descriptionForeground);
+      width: 100%;
       max-width: 100%;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 12px;
     }
 
-    details summary {
+    .tool-call-card summary {
+      display: flex;
+      align-items: center;
+      gap: 7px;
       cursor: pointer;
+      padding: 5px 10px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      list-style: none;
+      background: var(--vscode-sideBar-background);
+      user-select: none;
+      min-width: 0;
+    }
+    .tool-call-card summary::-webkit-details-marker { display: none; }
+
+    .tool-call-card[open] > summary {
+      border-radius: 4px 4px 0 0;
+      border-bottom-color: transparent;
+    }
+
+    .tc-arrow {
+      font-size: 9px;
       color: var(--vscode-descriptionForeground);
-      font-size: 11px;
+      flex-shrink: 0;
+      transition: transform 0.15s;
+    }
+    .tool-call-card[open] .tc-arrow { transform: rotate(90deg); }
+
+    .tc-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .tc-dot.running  { background: #4ec9b0; }
+    .tc-dot.done     { background: var(--vscode-descriptionForeground); opacity: 0.6; }
+    .tc-dot.failed   { background: #f44747; }
+
+    .tc-name {
+      font-weight: 700;
+      color: var(--vscode-editor-foreground);
+      flex-shrink: 0;
+    }
+
+    .tc-title {
+      color: var(--vscode-descriptionForeground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .tc-body {
+      border: 1px solid var(--vscode-panel-border);
+      border-top: none;
+      border-radius: 0 0 4px 4px;
+      overflow: hidden;
+    }
+
+    .tc-row {
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      align-items: start;
+      gap: 6px;
+      padding: 5px 8px;
+    }
+    .tc-row + .tc-row {
+      border-top: 1px solid var(--vscode-panel-border);
+    }
+
+    .tc-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--vscode-descriptionForeground);
+      padding-top: 2px;
+    }
+
+    .tc-content {
+      font-family: var(--vscode-editor-font-family);
+      font-size: 12px;
+      white-space: pre;
+      overflow-x: auto;
+      margin: 0;
+      color: var(--vscode-editor-foreground);
+      max-height: 140px;
+      overflow-y: auto;
+      line-height: 1.5;
     }
 
     #input-area {
@@ -211,6 +294,7 @@
     let currentAssistantEl = null;
     let currentRawText = '';
     let busy = false;
+    const toolCallMap = new Map(); // toolCallId → {details, dot}
 
     // --- Minimal markdown renderer ---
     function escapeHtml(s) {
@@ -348,17 +432,63 @@
           sendBtn.disabled = false;
           inputEl.focus();
           break;
-        case 'toolCall': {
+        case 'toolCallStart': {
+          const name = msg.title ? String(msg.title).charAt(0).toUpperCase() + String(msg.title).slice(1) : 'Tool';
+          const inputText = msg.rawInput
+            ? (typeof msg.rawInput === 'string' ? msg.rawInput : JSON.stringify(msg.rawInput, null, 2))
+            : '';
+
           const details = document.createElement('details');
-          details.className = 'message tool';
+          details.className = 'tool-call-card';
+
           const summary = document.createElement('summary');
-          summary.textContent = '⚙ Tool call';
-          const pre = document.createElement('pre');
-          pre.textContent = msg.text;
+          summary.innerHTML =
+            `<span class="tc-arrow">▶</span>` +
+            `<span class="tc-dot running"></span>` +
+            `<span class="tc-name">${escapeHtml(name)}</span>` +
+            (inputText ? `<span class="tc-title">${escapeHtml(inputText.split('\n')[0].slice(0, 80))}</span>` : '');
+
+          const body = document.createElement('div');
+          body.className = 'tc-body';
+
+          if (inputText) {
+            const row = document.createElement('div');
+            row.className = 'tc-row';
+            row.innerHTML = `<span class="tc-label">IN</span><pre class="tc-content">${escapeHtml(inputText)}</pre>`;
+            body.appendChild(row);
+          }
+
           details.appendChild(summary);
-          details.appendChild(pre);
+          details.appendChild(body);
           messagesEl.appendChild(details);
           scrollBottom();
+
+          if (msg.toolCallId) {
+            toolCallMap.set(msg.toolCallId, { details, dot: summary.querySelector('.tc-dot'), body });
+          }
+          break;
+        }
+        case 'toolCallUpdate': {
+          const entry = msg.toolCallId ? toolCallMap.get(msg.toolCallId) : null;
+          if (entry) {
+            // Update status dot
+            if (msg.status === 'completed') {
+              entry.dot.className = 'tc-dot done';
+            } else if (msg.status === 'failed') {
+              entry.dot.className = 'tc-dot failed';
+            }
+            // Add output row if present
+            if (msg.rawOutput !== undefined && msg.rawOutput !== null) {
+              const outputText = typeof msg.rawOutput === 'string'
+                ? msg.rawOutput
+                : JSON.stringify(msg.rawOutput, null, 2);
+              const row = document.createElement('div');
+              row.className = 'tc-row';
+              row.innerHTML = `<span class="tc-label">OUT</span><pre class="tc-content">${escapeHtml(outputText)}</pre>`;
+              entry.body.appendChild(row);
+              scrollBottom();
+            }
+          }
           break;
         }
       }

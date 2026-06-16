@@ -99,8 +99,8 @@ def enable(yes: bool = False) -> None:
         "  temper    — blocks large/critical commits without review (/temper)\n"
         "  cairn     — nudges toward better commit messages (/cairn-commit)\n"
         "\nBonsai MCP servers registered (started on first use):\n"
-        "  bonsai-py — uvx bonsai-python\n"
-        "  bonsai-ts — npx --yes bonsai-ts@latest\n"
+        f"  bonsai-py — uvx --from {_BONSAI_DIR} bonsai-python\n"
+        f"  bonsai-ts — node {_BONSAI_DIR / 'ts' / 'bin' / 'bonsai-ts.js'}\n"
         "\nBypass any gate: append # aether:skip to your bash command.\n"
         "Disable: vibe --disable-aether\n"
     )
@@ -217,19 +217,21 @@ def status() -> None:
     print(f"Status:               {'enabled' if active else 'disabled'}")
 
 
+_BONSAI_DIR = Path.home() / ".claude" / "plugins" / "marketplaces" / "bonsai"
+
 _BONSAI_SERVERS = [
     {
         "name": "bonsai-py",
         "transport": "stdio",
         "command": "uvx",
-        "args": ["bonsai-python"],
+        "args": ["--from", str(_BONSAI_DIR), "bonsai-python"],
         "prompt": "AST-aware Python refactoring tools (pyfindrefs, pyrename, pymove, pysignature, pygrep, pycallers, pyfindunused)",
     },
     {
         "name": "bonsai-ts",
         "transport": "stdio",
-        "command": "npx",
-        "args": ["--yes", "bonsai-ts@latest"],
+        "command": "node",
+        "args": [str(_BONSAI_DIR / "ts" / "bin" / "bonsai-ts.js")],
         "prompt": "AST-aware TypeScript/JavaScript refactoring tools (tsfindrefs, tsrename, tsmove, tsmovesymbol, tssignature)",
     },
 ]

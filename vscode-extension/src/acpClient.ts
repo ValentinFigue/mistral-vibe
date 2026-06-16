@@ -1,5 +1,11 @@
 import * as cp from "child_process";
+import * as os from "os";
+import * as path from "path";
 import * as readline from "readline";
+
+// Bonsai is a local Claude Code plugin — not on PyPI/npm under these names.
+// The plugin lives in ~/.claude/plugins/marketplaces/bonsai.
+const BONSAI_DIR = path.join(os.homedir(), ".claude", "plugins", "marketplaces", "bonsai");
 
 const ACP_TIMEOUT_MS = 30_000;
 const PROMPT_TIMEOUT_MS = 5 * 60 * 1000; // 5 min — streaming response arrives after all chunks
@@ -63,13 +69,26 @@ export class AcpClient {
       clientInfo: { name: "vibe-vscode", version: "0.1.0" },
     });
 
-    // 2. session/new — pass bonsai MCP servers so vibe wires them automatically
+    // 2. session/new — bonsai is a local Claude Code plugin, not on PyPI/npm.
+    // uvx --from <dir> installs from the local pyproject.toml, bypassing the
+    // broken public PyPI release. bonsai-ts is invoked via node directly since
+    // it has no npm release.
     const result = await this._send("session/new", {
       cwd,
       additionalDirectories: [],
       mcpServers: [
-        { name: "bonsai-python", command: "uvx", args: ["bonsai-python"], env: [] },
-        { name: "bonsai-ts", command: "npx", args: ["--yes", "bonsai-ts@latest"], env: [] },
+        {
+          name: "bonsai-python",
+          command: "uvx",
+          args: ["--from", BONSAI_DIR, "bonsai-python"],
+          env: [],
+        },
+        {
+          name: "bonsai-ts",
+          command: "node",
+          args: [path.join(BONSAI_DIR, "ts", "bin", "bonsai-ts.js")],
+          env: [],
+        },
       ],
     });
 

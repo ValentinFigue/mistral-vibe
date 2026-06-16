@@ -1,5 +1,9 @@
 import * as cp from "child_process";
+import * as os from "os";
+import * as path from "path";
 import * as readline from "readline";
+
+const BONSAI_DIR = path.join(os.homedir(), ".claude", "plugins", "marketplaces", "bonsai");
 
 interface McpToolResult {
   content?: Array<{ type: string; text?: string }>;
@@ -17,8 +21,8 @@ async function withBonsaiSession<T>(
 ): Promise<T> {
   const [cmd, cmdArgs]: [string, string[]] =
     server === "python"
-      ? ["uvx", ["bonsai-python"]]
-      : ["npx", ["--yes", "bonsai-ts@latest"]];
+      ? ["uvx", ["--from", BONSAI_DIR, "bonsai-python"]]
+      : ["node", [path.join(BONSAI_DIR, "ts", "bin", "bonsai-ts.js")]];
 
   const proc = cp.spawn(cmd, cmdArgs, {
     stdio: ["pipe", "pipe", "pipe"],

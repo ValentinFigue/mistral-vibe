@@ -3,6 +3,7 @@
   "displayName": "Vibe",
   "description": "Mistral vibe coding assistant with aether discipline suite",
   "version": "0.1.0",
+  "publisher": "valentinfigue",
   "engines": {
     "vscode": "^1.85.0"
   },

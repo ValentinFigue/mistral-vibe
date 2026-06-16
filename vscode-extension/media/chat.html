@@ -270,6 +270,19 @@
 
     #send:hover { background: var(--vscode-button-hoverBackground); }
     #send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    #stop-btn {
+      display: none;
+      padding: 6px 14px;
+      background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
+      color: var(--vscode-button-foreground);
+      border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: var(--vscode-font-size);
+      align-self: flex-end;
+    }
+    #stop-btn:hover { opacity: 0.85; }
   </style>
 </head>
 <body>
@@ -280,6 +293,7 @@
   <div id="messages"></div>
   <div id="input-area">
     <textarea id="input" placeholder="Ask vibe anything…" rows="1"></textarea>
+    <button id="stop-btn">Stop</button>
     <button id="send">Send</button>
   </div>
 
@@ -288,6 +302,7 @@
     const messagesEl = document.getElementById('messages');
     const inputEl = document.getElementById('input');
     const sendBtn = document.getElementById('send');
+    const stopBtn = document.getElementById('stop-btn');
     const statusTextEl = document.getElementById('status-text');
     const reconnectBtn = document.getElementById('reconnect-btn');
 
@@ -373,17 +388,27 @@
       return el;
     }
 
+    function setBusy(val) {
+      busy = val;
+      sendBtn.disabled = val;
+      stopBtn.style.display = val ? 'inline-block' : 'none';
+    }
+
     function send() {
       const text = inputEl.value.trim();
       if (!text || busy) return;
-      busy = true;
-      sendBtn.disabled = true;
+      setBusy(true);
       inputEl.value = '';
       inputEl.style.height = 'auto';
       vscode.postMessage({ type: 'prompt', text });
     }
 
     sendBtn.addEventListener('click', send);
+    stopBtn.addEventListener('click', () => {
+      setBusy(false);
+      statusTextEl.textContent = 'Stopping…';
+      vscode.postMessage({ type: 'stop' });
+    });
     reconnectBtn.addEventListener('click', () => {
       reconnectBtn.style.display = 'none';
       statusTextEl.textContent = 'Reconnecting…';
@@ -408,8 +433,7 @@
         case 'disconnected':
           statusTextEl.textContent = msg.text ?? 'Connection lost.';
           reconnectBtn.style.display = 'inline-block';
-          busy = false;
-          sendBtn.disabled = false;
+          setBusy(false);
           break;
         case 'userMessage':
           addMessage('user', msg.text);
@@ -428,8 +452,7 @@
         case 'assistantEnd':
           currentAssistantEl = null;
           currentRawText = '';
-          busy = false;
-          sendBtn.disabled = false;
+          setBusy(false);
           inputEl.focus();
           break;
         case 'toolCallStart': {

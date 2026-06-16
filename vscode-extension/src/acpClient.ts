@@ -8,7 +8,7 @@ import * as readline from "readline";
 const BONSAI_DIR = path.join(os.homedir(), ".claude", "plugins", "marketplaces", "bonsai");
 
 const ACP_TIMEOUT_MS = 30_000;
-const PROMPT_TIMEOUT_MS = 5 * 60 * 1000; // 5 min — streaming response arrives after all chunks
+const PROMPT_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — long tasks (rename+rewrite) can take time
 
 export interface AcpChunk {
   sessionUpdate: string;

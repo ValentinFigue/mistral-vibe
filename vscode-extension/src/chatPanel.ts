@@ -73,7 +73,7 @@ export class ChatPanel {
       async (msg: { type: string; text?: string }) => {
         if (msg.type === "prompt" && msg.text) {
           await this._handlePrompt(msg.text);
-        } else if (msg.type === "reconnect") {
+        } else if (msg.type === "reconnect" || msg.type === "stop") {
           await this._init();
         }
       },
@@ -137,8 +137,22 @@ export class ChatPanel {
         }
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this._postMessage({ type: "assistantChunk", text: `\n\n*Error: ${msg}*` });
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isConcurrent = errMsg.includes("Concurrent prompts");
+      const isTimeout = errMsg.includes("timed out");
+
+      if (isConcurrent || isTimeout) {
+        // Session is stuck — kill and restart so the user can retry immediately
+        this._postMessage({
+          type: "assistantChunk",
+          text: `\n\n*${isTimeout ? "Task timed out" : "Session busy"} — reconnecting…*`,
+        });
+        this._postMessage({ type: "assistantEnd" });
+        await this._init();
+        return;
+      }
+
+      this._postMessage({ type: "assistantChunk", text: `\n\n*Error: ${errMsg}*` });
     }
 
     this._postMessage({ type: "assistantEnd" });

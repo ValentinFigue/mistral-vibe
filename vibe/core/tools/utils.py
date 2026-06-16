@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re as _re
 from pathlib import Path, PurePath
 
 from vibe.core.scratchpad import is_scratchpad_path
@@ -19,21 +20,33 @@ def _make_absolute(path_str: str) -> Path:
     return path
 
 
+def matches_pattern(text: str, pattern: str) -> bool:
+    """Match text against a glob or regex pattern.
+
+    Prefix 're:' triggers full regex search; otherwise uses fnmatch glob matching.
+    Consistent with the 're:' prefix support in enabled_tools / disabled_tools.
+    """
+    if pattern.startswith("re:"):
+        return bool(_re.search(pattern[3:], text))
+    return fnmatch.fnmatch(text, pattern)
+
+
 def resolve_path_permission(
     path_str: str, *, allowlist: list[str], denylist: list[str]
 ) -> PermissionContext | None:
-    """Resolve permission for a file path against glob patterns.
+    """Resolve permission for a file path against glob or regex patterns.
 
     Returns NEVER on denylist match, ALWAYS on allowlist match, None otherwise.
+    Patterns prefixed with 're:' are matched as regexes; all others use fnmatch.
     """
     file_str = str(_make_absolute(path_str).resolve())
 
     for pattern in denylist:
-        if fnmatch.fnmatch(file_str, pattern):
+        if matches_pattern(file_str, pattern):
             return PermissionContext(permission=ToolPermission.NEVER)
 
     for pattern in allowlist:
-        if fnmatch.fnmatch(file_str, pattern):
+        if matches_pattern(file_str, pattern):
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
     return None

@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from functools import lru_cache
 import os
+import re as _re
 from pathlib import Path
 from typing import ClassVar, Literal, final
 
@@ -237,6 +238,13 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
 
 
 def _matches_pattern(command: str, pattern: str) -> bool:
+    """Match a command against an allowlist/denylist pattern.
+
+    Prefix 're:' triggers regex search; otherwise uses exact prefix matching
+    (command equals pattern, or command starts with pattern followed by a space).
+    """
+    if pattern.startswith("re:"):
+        return bool(_re.search(pattern[3:], command))
     return command == pattern or command.startswith(pattern + " ")
 
 
@@ -357,7 +365,8 @@ class Bash(
         tokens = command.split()
         if not tokens:
             return False
-        return tokens[0] in self.config.sensitive_patterns
+        first_token = tokens[0]
+        return any(_matches_pattern(first_token, p) for p in self.config.sensitive_patterns)
 
     def _resolve_guardrail_permission(
         self, command_parts: list[str]

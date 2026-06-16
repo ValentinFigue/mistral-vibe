@@ -32,10 +32,11 @@ class ApprovalApp(Container):
         Binding("enter", "select", "Select", show=False),
         Binding("1", "select_1", "Yes", show=False),
         Binding("y", "select_1", "Yes", show=False),
-        Binding("2", "select_2", "Always Tool Session", show=False),
-        Binding("3", "select_3", "Always Permanent", show=False),
+        Binding("2", "select_2", "Allow this session", show=False),
+        Binding("3", "select_3", "Always allow", show=False),
         Binding("4", "select_4", "No", show=False),
         Binding("n", "select_4", "No", show=False),
+        Binding("s", "toggle_scope", "Switch scope", show=False),
     ]
 
     class ApprovalGranted(Message):
@@ -86,12 +87,14 @@ class ApprovalApp(Container):
         self.tool_args = tool_args
         self.config = config
         self.required_permissions = required_permissions or []
+        self._use_specific_scope: bool = False
         self.selected_option = 0
         self.content_container: Vertical | None = None
         self.title_widget = NoMarkupStatic(
             self._build_title(), classes="approval-title"
         )
         self.tool_info_container: Vertical | None = None
+        self._scope_widget: NoMarkupStatic = NoMarkupStatic("", classes="approval-scope")
         self.option_widgets: list[Static] = []
         self.help_widget: Static | None = None
         self._mount_time: float = 0.0
@@ -108,6 +111,7 @@ class ApprovalApp(Container):
 
         with Vertical(id="approval-options"):
             yield NoMarkupStatic("")
+            yield self._scope_widget
             for _ in range(self.NUM_OPTIONS):
                 widget = NoMarkupStatic("", classes="approval-option")
                 self.option_widgets.append(widget)
@@ -126,6 +130,7 @@ class ApprovalApp(Container):
     async def on_mount(self) -> None:
         self._mount_time = time.monotonic()
         await self._update_tool_info()
+        self._update_scope_widget()
         self._update_options()
         self.focus()
         self._recompute_height()
@@ -167,11 +172,67 @@ class ApprovalApp(Container):
         await self.tool_info_container.remove_children()
         await self.tool_info_container.mount(approval_widget)
 
+    def _get_active_permissions(self) -> list[RequiredPermission]:
+        """Return required_permissions adjusted for the current scope mode.
+
+        In specific mode, collapses session_pattern to the exact invocation so that
+        rules created downstream only match the precise command or URL, not the
+        generalized wildcard pattern.
+        """
+        if not self._use_specific_scope:
+            return self.required_permissions
+        return [
+            rp.model_copy(update={"session_pattern": rp.invocation_pattern})
+            for rp in self.required_permissions
+        ]
+
+    def _scope_hint_text(self) -> str:
+        """Return the hint text for options 2/3 based on the active scope mode."""
+        if not self.required_permissions:
+            return ""
+        perms = self._get_active_permissions()
+        patterns = list(
+            dict.fromkeys(rp.session_pattern for rp in perms if rp.session_pattern != "*")
+        )
+        if not patterns:
+            return ""
+        label = "Specific" if self._use_specific_scope else "Pattern"
+        return f"  {label}: {', '.join(patterns)}"
+
+    def _update_scope_widget(self) -> None:
+        """Refresh the scope indicator line above the options."""
+        if not self.required_permissions:
+            self._scope_widget.update("")
+            return
+        perms = self._get_active_permissions()
+        patterns = list(
+            dict.fromkeys(rp.session_pattern for rp in perms if rp.session_pattern != "*")
+        )
+        if not patterns:
+            self._scope_widget.update("")
+            return
+        label = "Specific" if self._use_specific_scope else "Pattern"
+        toggle_hint = "pattern" if self._use_specific_scope else "specific"
+        self._scope_widget.update(
+            f"  Scope: {label} ({', '.join(patterns)})   [s to use {toggle_hint}]"
+        )
+
+    def action_toggle_scope(self) -> None:
+        if not self.required_permissions:
+            return
+        self._use_specific_scope = not self._use_specific_scope
+        self._update_scope_widget()
+        self._update_options()
+        self._recompute_height()
+
     def _update_options(self) -> None:
+        hint = self._scope_hint_text()
+        # Option 1 (Allow once) posts no rule, so scope is irrelevant — no hint shown.
+        suffix = f"\n{hint}" if hint else ""
         options = [
             ("Allow once", "yes"),
-            ("Allow for remainder of this session", "yes"),
-            ("Always allow", "yes"),
+            (f"Allow for remainder of this session{suffix}", "yes"),
+            (f"Always allow (saves to config){suffix}", "yes"),
             ("Deny", "no"),
         ]
 
@@ -248,7 +309,7 @@ class ApprovalApp(Container):
                     self.ApprovalGrantedAlwaysTool(
                         tool_name=self.tool_name,
                         tool_args=self.tool_args,
-                        required_permissions=self.required_permissions,
+                        required_permissions=self._get_active_permissions(),
                     )
                 )
             case 2:
@@ -256,7 +317,7 @@ class ApprovalApp(Container):
                     self.ApprovalGrantedAlwaysPermanent(
                         tool_name=self.tool_name,
                         tool_args=self.tool_args,
-                        required_permissions=self.required_permissions,
+                        required_permissions=self._get_active_permissions(),
                     )
                 )
             case 3:

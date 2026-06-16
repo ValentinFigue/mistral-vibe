@@ -2,6 +2,7 @@ import * as cp from "child_process";
 import * as readline from "readline";
 
 const ACP_TIMEOUT_MS = 30_000;
+const PROMPT_TIMEOUT_MS = 5 * 60 * 1000; // 5 min — streaming response arrives after all chunks
 
 export interface AcpChunk {
   sessionUpdate: string;
@@ -86,7 +87,7 @@ export class AcpClient {
       await this._send("session/prompt", {
         sessionId: this.sessionId,
         prompt: [{ type: "text", text }],
-      });
+      }, PROMPT_TIMEOUT_MS);
     } finally {
       this.updateHandler = null;
     }
@@ -124,7 +125,7 @@ export class AcpClient {
     }
   }
 
-  private _send(method: string, params: unknown): Promise<unknown> {
+  private _send(method: string, params: unknown, timeoutMs = ACP_TIMEOUT_MS): Promise<unknown> {
     return new Promise((resolve, reject) => {
       // 🔴 Fix: guard stdin before enqueuing — otherwise the Promise hangs forever
       if (!this.proc?.stdin) {
@@ -138,9 +139,9 @@ export class AcpClient {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(
-          new Error(`ACP request '${method}' timed out after ${ACP_TIMEOUT_MS}ms`)
+          new Error(`ACP request '${method}' timed out after ${timeoutMs}ms`)
         );
-      }, ACP_TIMEOUT_MS);
+      }, timeoutMs);
 
       this.pending.set(id, [
         (v) => { clearTimeout(timer); resolve(v); },

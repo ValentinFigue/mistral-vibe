@@ -67,8 +67,8 @@ export class AcpClient {
       cwd,
       additionalDirectories: [],
       mcpServers: [
-        { type: "stdio", command: "uvx", args: ["bonsai-python"] },
-        { type: "stdio", command: "npx", args: ["--yes", "bonsai-ts@latest"] },
+        { name: "bonsai-python", command: "uvx", args: ["bonsai-python"], env: [] },
+        { name: "bonsai-ts", command: "npx", args: ["--yes", "bonsai-ts@latest"], env: [] },
       ],
     });
 

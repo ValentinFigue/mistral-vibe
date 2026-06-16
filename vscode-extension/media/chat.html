@@ -3,10 +3,6 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!--
-    🔴 Fix: nonce-based CSP required by VSCode marketplace security checks.
-    {{nonce}} and {{cspSource}} are replaced at runtime by chatPanel.ts.
-  -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';" />
   <title>Vibe</title>
@@ -56,24 +52,86 @@
     }
 
     .message {
-      max-width: 90%;
+      max-width: 92%;
       padding: 8px 12px;
       border-radius: 6px;
-      white-space: pre-wrap;
       word-break: break-word;
-      line-height: 1.5;
+      line-height: 1.6;
     }
 
     .message.user {
       align-self: flex-end;
       background: var(--vscode-button-background);
       color: var(--vscode-button-foreground);
+      white-space: pre-wrap;
     }
 
     .message.assistant {
       align-self: flex-start;
       background: var(--vscode-input-background);
       border: 1px solid var(--vscode-panel-border);
+    }
+
+    /* Markdown rendering inside assistant bubbles */
+    .message.assistant h1,
+    .message.assistant h2,
+    .message.assistant h3 {
+      margin: 10px 0 4px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+    .message.assistant h1 { font-size: 1.2em; }
+    .message.assistant h2 { font-size: 1.1em; }
+    .message.assistant h3 { font-size: 1em; }
+
+    .message.assistant p { margin: 6px 0; }
+    .message.assistant p:first-child { margin-top: 0; }
+    .message.assistant p:last-child { margin-bottom: 0; }
+
+    .message.assistant ul,
+    .message.assistant ol {
+      margin: 6px 0;
+      padding-left: 20px;
+    }
+    .message.assistant li { margin: 2px 0; }
+
+    .message.assistant code {
+      font-family: var(--vscode-editor-font-family);
+      font-size: 0.9em;
+      background: var(--vscode-textCodeBlock-background);
+      border-radius: 3px;
+      padding: 1px 4px;
+    }
+
+    .message.assistant pre {
+      margin: 8px 0;
+      padding: 10px 12px;
+      background: var(--vscode-textCodeBlock-background);
+      border-radius: 4px;
+      overflow-x: auto;
+      border: 1px solid var(--vscode-panel-border);
+    }
+
+    .message.assistant pre code {
+      background: none;
+      padding: 0;
+      font-size: var(--vscode-editor-font-size, 13px);
+      white-space: pre;
+    }
+
+    .message.assistant strong { font-weight: 600; }
+    .message.assistant em { font-style: italic; }
+
+    .message.assistant a {
+      color: var(--vscode-textLink-foreground);
+      text-decoration: none;
+    }
+    .message.assistant a:hover { text-decoration: underline; }
+
+    .message.assistant hr {
+      border: none;
+      border-top: 1px solid var(--vscode-panel-border);
+      margin: 8px 0;
     }
 
     .message.tool {
@@ -151,16 +209,81 @@
     const reconnectBtn = document.getElementById('reconnect-btn');
 
     let currentAssistantEl = null;
+    let currentRawText = '';
     let busy = false;
+
+    // --- Minimal markdown renderer ---
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function renderMarkdown(raw) {
+      // 1. Extract fenced code blocks before escaping so their content is preserved
+      const blocks = [];
+      let text = raw.replace(/```([^\n]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+        const i = blocks.length;
+        const langClass = lang.trim() ? ` class="language-${escapeHtml(lang.trim())}"` : '';
+        blocks.push(`<pre><code${langClass}>${escapeHtml(code.trimEnd())}</code></pre>`);
+        return `\x00BLOCK${i}\x00`;
+      });
+
+      // 2. Escape remaining HTML
+      text = escapeHtml(text);
+
+      // 3. Inline code
+      text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+      // 4. Bold + italic (order: *** before ** before *)
+      text = text.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+      text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+      // 5. Headers
+      text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+      // 6. Horizontal rules
+      text = text.replace(/^[-*_]{3,}$/gm, '<hr>');
+
+      // 7. Ordered lists
+      text = text.replace(/^(\d+)\. (.+)$/gm, '<li>$2</li>');
+
+      // 8. Unordered lists
+      text = text.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
+
+      // Wrap consecutive <li> runs in <ul> (simple heuristic)
+      text = text.replace(/(<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
+
+      // 9. Paragraphs: split on blank lines
+      const parts = text.split(/\n{2,}/);
+      text = parts.map(p => {
+        p = p.trim();
+        if (!p) return '';
+        // Don't wrap block elements in <p>
+        if (/^<(h[1-6]|ul|ol|li|pre|hr|blockquote)/.test(p)) return p;
+        return `<p>${p.replace(/\n/g, '<br>')}</p>`;
+      }).join('\n');
+
+      // 10. Restore code blocks
+      text = text.replace(/\x00BLOCK(\d+)\x00/g, (_, i) => blocks[parseInt(i, 10)]);
+
+      return text;
+    }
+    // --- End markdown renderer ---
 
     function scrollBottom() {
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
-    function addMessage(cls, text) {
+    function addMessage(cls, htmlContent) {
       const el = document.createElement('div');
       el.className = `message ${cls}`;
-      el.textContent = text;
+      if (cls === 'user') {
+        el.textContent = htmlContent; // user input: plain text, no XSS risk but use textContent
+      } else {
+        el.innerHTML = htmlContent;
+      }
       messagesEl.appendChild(el);
       scrollBottom();
       return el;
@@ -208,16 +331,19 @@
           addMessage('user', msg.text);
           break;
         case 'assistantStart':
+          currentRawText = '';
           currentAssistantEl = addMessage('assistant', '');
           break;
         case 'assistantChunk':
           if (currentAssistantEl) {
-            currentAssistantEl.textContent += msg.text;
+            currentRawText += msg.text;
+            currentAssistantEl.innerHTML = renderMarkdown(currentRawText);
             scrollBottom();
           }
           break;
         case 'assistantEnd':
           currentAssistantEl = null;
+          currentRawText = '';
           busy = false;
           sendBtn.disabled = false;
           inputEl.focus();

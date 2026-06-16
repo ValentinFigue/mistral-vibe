@@ -1,0 +1,84 @@
+{
+  "name": "vibe-vscode",
+  "displayName": "Vibe",
+  "description": "Mistral vibe coding assistant with aether discipline suite",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vibe.openChat",
+        "title": "Vibe: Open chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "vibe.enableAether",
+        "title": "Vibe: Enable aether discipline hooks"
+      },
+      {
+        "command": "vibe.disableAether",
+        "title": "Vibe: Disable aether discipline hooks"
+      },
+      {
+        "command": "vibe.aetherStatus",
+        "title": "Vibe: Show aether status"
+      },
+      {
+        "command": "vibe.temperReview",
+        "title": "Vibe: Review staged diff (temper)",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "vibe.cairnCommit",
+        "title": "Vibe: Generate commit message",
+        "icon": "$(git-commit)"
+      }
+    ],
+    "configuration": {
+      "title": "Vibe",
+      "properties": {
+        "vibe.executablePath": {
+          "type": "string",
+          "default": "vibe",
+          "description": "Path to the vibe executable (default: 'vibe' on PATH)"
+        },
+        "vibe.acpExecutablePath": {
+          "type": "string",
+          "default": "vibe-acp",
+          "description": "Path to the vibe-acp executable (default: 'vibe-acp' on PATH)"
+        }
+      }
+    },
+    "menus": {
+      "scm/title": [
+        {
+          "command": "vibe.cairnCommit",
+          "group": "navigation",
+          "when": "scmProvider == git"
+        },
+        {
+          "command": "vibe.temperReview",
+          "group": "navigation",
+          "when": "scmProvider == git"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}

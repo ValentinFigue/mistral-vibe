@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!--
+    🔴 Fix: nonce-based CSP required by VSCode marketplace security checks.
+    {{nonce}} and {{cspSource}} are replaced at runtime by chatPanel.ts.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';" />
+  <title>Vibe</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-editor-background);
+    }
+
+    #status {
+      padding: 6px 12px;
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      border-bottom: 1px solid var(--vscode-panel-border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #reconnect-btn {
+      display: none;
+      padding: 2px 8px;
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+
+    #reconnect-btn:hover { opacity: 0.85; }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .message {
+      max-width: 90%;
+      padding: 8px 12px;
+      border-radius: 6px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+
+    .message.assistant {
+      align-self: flex-start;
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-panel-border);
+    }
+
+    .message.tool {
+      align-self: flex-start;
+      background: transparent;
+      border: 1px solid var(--vscode-panel-border);
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      max-width: 100%;
+    }
+
+    details summary {
+      cursor: pointer;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+    }
+
+    #input-area {
+      display: flex;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-sideBar-background);
+    }
+
+    #input {
+      flex: 1;
+      padding: 6px 10px;
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      resize: none;
+      min-height: 36px;
+      max-height: 120px;
+    }
+
+    #input:focus { outline: 1px solid var(--vscode-focusBorder); }
+
+    #send {
+      padding: 6px 14px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: var(--vscode-font-size);
+      align-self: flex-end;
+    }
+
+    #send:hover { background: var(--vscode-button-hoverBackground); }
+    #send:disabled { opacity: 0.5; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <div id="status">
+    <span id="status-text">Initializing…</span>
+    <button id="reconnect-btn">Reconnect</button>
+  </div>
+  <div id="messages"></div>
+  <div id="input-area">
+    <textarea id="input" placeholder="Ask vibe anything…" rows="1"></textarea>
+    <button id="send">Send</button>
+  </div>
+
+  <script nonce="{{nonce}}">
+    const vscode = acquireVsCodeApi();
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+    const statusTextEl = document.getElementById('status-text');
+    const reconnectBtn = document.getElementById('reconnect-btn');
+
+    let currentAssistantEl = null;
+    let busy = false;
+
+    function scrollBottom() {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function addMessage(cls, text) {
+      const el = document.createElement('div');
+      el.className = `message ${cls}`;
+      el.textContent = text;
+      messagesEl.appendChild(el);
+      scrollBottom();
+      return el;
+    }
+
+    function send() {
+      const text = inputEl.value.trim();
+      if (!text || busy) return;
+      busy = true;
+      sendBtn.disabled = true;
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+      vscode.postMessage({ type: 'prompt', text });
+    }
+
+    sendBtn.addEventListener('click', send);
+    reconnectBtn.addEventListener('click', () => {
+      reconnectBtn.style.display = 'none';
+      statusTextEl.textContent = 'Reconnecting…';
+      vscode.postMessage({ type: 'reconnect' });
+    });
+
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    inputEl.addEventListener('input', () => {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    });
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      switch (msg.type) {
+        case 'status':
+          statusTextEl.textContent = msg.text;
+          reconnectBtn.style.display = 'none';
+          break;
+        case 'disconnected':
+          statusTextEl.textContent = msg.text ?? 'Connection lost.';
+          reconnectBtn.style.display = 'inline-block';
+          busy = false;
+          sendBtn.disabled = false;
+          break;
+        case 'userMessage':
+          addMessage('user', msg.text);
+          break;
+        case 'assistantStart':
+          currentAssistantEl = addMessage('assistant', '');
+          break;
+        case 'assistantChunk':
+          if (currentAssistantEl) {
+            currentAssistantEl.textContent += msg.text;
+            scrollBottom();
+          }
+          break;
+        case 'assistantEnd':
+          currentAssistantEl = null;
+          busy = false;
+          sendBtn.disabled = false;
+          inputEl.focus();
+          break;
+        case 'toolCall': {
+          const details = document.createElement('details');
+          details.className = 'message tool';
+          const summary = document.createElement('summary');
+          summary.textContent = '⚙ Tool call';
+          const pre = document.createElement('pre');
+          pre.textContent = msg.text;
+          details.appendChild(summary);
+          details.appendChild(pre);
+          messagesEl.appendChild(details);
+          scrollBottom();
+          break;
+        }
+      }
+    });
+  </script>
+</body>
+</html>

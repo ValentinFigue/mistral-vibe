@@ -4,7 +4,7 @@ import * as readline from "readline";
 const ACP_TIMEOUT_MS = 30_000;
 
 export interface AcpChunk {
-  kind: string;
+  sessionUpdate: string;
   content?: { type: string; text: string };
   [key: string]: unknown;
 }

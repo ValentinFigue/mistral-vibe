@@ -117,9 +117,9 @@ export class ChatPanel {
 
     try {
       await this.acp.prompt(text, (chunk: AcpChunk) => {
-        if (chunk.kind === "agent_message_chunk" && chunk.content?.text) {
+        if (chunk.sessionUpdate === "agent_message_chunk" && chunk.content?.text) {
           this._postMessage({ type: "assistantChunk", text: chunk.content.text });
-        } else if (chunk.kind === "tool_call") {
+        } else if (chunk.sessionUpdate === "tool_call") {
           this._postMessage({
             type: "toolCall",
             text: JSON.stringify(chunk, null, 2),

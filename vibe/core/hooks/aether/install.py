@@ -302,16 +302,28 @@ def _register_bonsai_servers(config_doc: dict) -> None:  # type: ignore[type-arg
     import tomlkit
 
     existing_raw = list(config_doc.get("mcp_servers") or [])
-    existing_names = {s.get("name") for s in existing_raw}
+    bonsai_by_name = {s["name"]: s for s in _BONSAI_SERVERS}
 
-    to_add = [s for s in _BONSAI_SERVERS if s["name"] not in existing_names]
-    if not to_add:
+    # Separate existing servers into bonsai ones (to replace) and others (to keep).
+    others = [s for s in existing_raw if s.get("name") not in bonsai_by_name]
+    to_write = [*others, *_BONSAI_SERVERS]
+
+    # Check whether any bonsai entry actually changed to avoid unnecessary writes.
+    existing_bonsai = {s.get("name"): dict(s) for s in existing_raw if s.get("name") in bonsai_by_name}
+    changed = [
+        s for s in _BONSAI_SERVERS
+        if existing_bonsai.get(s["name"], {}).get("command") != s["command"]
+        or existing_bonsai.get(s["name"], {}).get("args") != s["args"]
+    ]
+    added = [s for s in _BONSAI_SERVERS if s["name"] not in existing_bonsai]
+
+    if not changed and not added:
         return
 
     # Rebuild as a proper AoT — avoids the invalid-TOML bug where appending
     # a table() to an existing inline [] produces `mcp_servers = [key = val ...]`.
     aot = tomlkit.aot()
-    for entry_data in [*existing_raw, *to_add]:
+    for entry_data in to_write:
         entry = tomlkit.table()
         for k, v in dict(entry_data).items():
             if isinstance(v, list):
@@ -328,8 +340,10 @@ def _register_bonsai_servers(config_doc: dict) -> None:  # type: ignore[type-arg
         del config_doc["mcp_servers"]
     config_doc["mcp_servers"] = aot  # type: ignore[index]
 
-    for spec in to_add:
+    for spec in added:
         print(f"✓ MCP server registered: {spec['name']}")
+    for spec in changed:
+        print(f"✓ MCP server updated: {spec['name']}")
 
 
 def _write_skills() -> None:

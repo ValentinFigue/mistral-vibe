@@ -43,6 +43,16 @@ class ApprovedRule(BaseModel):
     session_pattern: str
 
 
+def _try_regex_match(text: str, pattern: str) -> bool | None:
+    """If pattern starts with 're:', run a regex search and return bool.
+
+    Returns None for non-re: patterns so the caller can apply its own fallback.
+    """
+    if not pattern.startswith("re:"):
+        return None
+    return bool(_re.search(pattern[3:], text))
+
+
 def wildcard_match(text: str, pattern: str) -> bool:
     """Match text against a session rule pattern.
 
@@ -50,8 +60,8 @@ def wildcard_match(text: str, pattern: str) -> bool:
     with one extension: if the pattern ends with ' *', trailing args are optional
     (the pattern matches both with and without trailing arguments).
     """
-    if pattern.startswith("re:"):
-        return bool(_re.search(pattern[3:], text))
+    if (m := _try_regex_match(text, pattern)) is not None:
+        return m
     if fnmatch.fnmatch(text, pattern):
         return True
     if pattern.endswith(" *") and fnmatch.fnmatch(text, pattern[:-2]):

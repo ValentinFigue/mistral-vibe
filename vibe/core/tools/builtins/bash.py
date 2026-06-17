@@ -4,7 +4,6 @@ import asyncio
 from collections.abc import AsyncGenerator
 from functools import lru_cache
 import os
-import re as _re
 from pathlib import Path
 from typing import ClassVar, Literal, final
 
@@ -27,6 +26,7 @@ from vibe.core.tools.permissions import (
     PermissionScope,
     RequiredPermission,
     ScopeOption,
+    _try_regex_match,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import is_path_within_workdir
@@ -244,8 +244,8 @@ def _matches_pattern(command: str, pattern: str) -> bool:
     Prefix 're:' triggers regex search; otherwise uses exact prefix matching
     (command equals pattern, or command starts with pattern followed by a space).
     """
-    if pattern.startswith("re:"):
-        return bool(_re.search(pattern[3:], command))
+    if (m := _try_regex_match(command, pattern)) is not None:
+        return m
     return command == pattern or command.startswith(pattern + " ")
 
 
@@ -345,12 +345,9 @@ class Bash(
     def _build_command_required_permission(
         invocation_pattern: str, session_pattern: str, label: str, tool_name: str = "bash"
     ) -> RequiredPermission:
-        if invocation_pattern != session_pattern:
-            ladder, default_idx = Bash._build_bash_scope_ladder(
-                invocation_pattern, session_pattern, tool_name
-            )
-        else:
-            ladder, default_idx = [], 0
+        ladder, default_idx = Bash._build_bash_scope_ladder(
+            invocation_pattern, session_pattern, tool_name
+        )
         return RequiredPermission(
             scope=PermissionScope.COMMAND_PATTERN,
             invocation_pattern=invocation_pattern,

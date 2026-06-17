@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import fnmatch
-import re as _re
 from pathlib import Path, PurePath
 
 from vibe.core.scratchpad import is_scratchpad_path
@@ -10,6 +9,7 @@ from vibe.core.tools.permissions import (
     PermissionContext,
     PermissionScope,
     RequiredPermission,
+    _try_regex_match,
 )
 
 
@@ -26,8 +26,8 @@ def matches_pattern(text: str, pattern: str) -> bool:
     Prefix 're:' triggers full regex search; otherwise uses fnmatch glob matching.
     Consistent with the 're:' prefix support in enabled_tools / disabled_tools.
     """
-    if pattern.startswith("re:"):
-        return bool(_re.search(pattern[3:], text))
+    if (m := _try_regex_match(text, pattern)) is not None:
+        return m
     return fnmatch.fnmatch(text, pattern)
 
 

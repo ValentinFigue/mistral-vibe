@@ -21,7 +21,7 @@ from typing import (
     get_type_hints,
 )
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from vibe.core.logger import logger
 from vibe.core.rewind.manager import FileSnapshot
@@ -121,6 +121,17 @@ class BaseToolConfig(BaseModel):
     allowlist: list[str] = Field(default_factory=list)
     denylist: list[str] = Field(default_factory=list)
     sensitive_patterns: list[str] = Field(default_factory=list)
+
+    @field_validator("allowlist", "denylist", "sensitive_patterns", mode="after")
+    @classmethod
+    def _validate_re_patterns(cls, patterns: list[str]) -> list[str]:
+        for p in patterns:
+            if p.startswith("re:"):
+                try:
+                    re.compile(p[3:])
+                except re.error as e:
+                    raise ValueError(f"Invalid regex in pattern {p!r}: {e}") from e
+        return patterns
 
 
 class BaseToolState(BaseModel):

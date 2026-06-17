@@ -165,7 +165,11 @@ class AsyncLSPClient:
         *,
         timeout: float | None = None,
     ) -> Any:
-        if self._process is None or self._process.returncode is not None:
+        if (
+            self._status in (ServerStatus.STOPPED, ServerStatus.FAILED)
+            or self._process is None
+            or self._process.returncode is not None
+        ):
             raise LSPError(-32003, f"{self._name}: server is not running")
 
         req_id = self._next_id()

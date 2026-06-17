@@ -3530,7 +3530,7 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         from pathlib import Path as _Path
-        resolved = _Path(file_path).resolve()
+        resolved = _resolve_lsp_path(file_path, _Path(lsp._workspace_root))
         if not resolved.exists():
             await self._mount_and_scroll(ErrorMessage(f"File not found: {file_path}"))
             return
@@ -3570,9 +3570,10 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         file_path, line, col = parsed
+        from pathlib import Path as _Path
+        file_path = str(_resolve_lsp_path(file_path, _Path(lsp._workspace_root)))
         client = lsp.get_client_for_file(file_path)
         if client is None:
-            from pathlib import Path as _Path
             await self._mount_and_scroll(ErrorMessage(f"No LSP server for '{_Path(file_path).suffix}' files."))
             return
 
@@ -3622,9 +3623,10 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         file_path, line, col = parsed
+        from pathlib import Path as _Path
+        file_path = str(_resolve_lsp_path(file_path, _Path(lsp._workspace_root)))
         client = lsp.get_client_for_file(file_path)
         if client is None:
-            from pathlib import Path as _Path
             await self._mount_and_scroll(ErrorMessage(f"No LSP server for '{_Path(file_path).suffix}' files."))
             return
 
@@ -3670,7 +3672,7 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         from pathlib import Path as _Path
-        resolved = _Path(file_path).resolve()
+        resolved = _resolve_lsp_path(file_path, _Path(lsp._workspace_root))
         client = lsp.get_client_for_file(str(resolved))
         if client is None:
             await self._mount_and_scroll(ErrorMessage(f"No LSP server for '{resolved.suffix}' files."))
@@ -4015,6 +4017,28 @@ class VibeApp(App):  # noqa: PLR0904
             audio_player=AudioPlayer(),
             telemetry_client=self.agent_loop.telemetry_client,
         )
+
+
+def _resolve_lsp_path(file_path: str, workspace_root: "Path") -> "Path":
+    """Resolve a possibly-relative LSP command path.
+
+    Tries the workspace root first, then walks up parent directories so that a
+    path like 'vibe/core/lsp/_client.py' is found even when vibe was launched
+    from a subdirectory of the project.
+    """
+    from pathlib import Path as _Path
+    candidate = _Path(file_path)
+    if candidate.is_absolute():
+        return candidate
+    home = _Path.home()
+    search_root = workspace_root.resolve()
+    for directory in (search_root, *search_root.parents):
+        attempt = directory / candidate
+        if attempt.exists():
+            return attempt
+        if directory == home or directory == directory.parent:
+            break
+    return candidate.resolve()
 
 
 def _parse_file_position(text: str) -> tuple[str, int, int] | None:

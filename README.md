@@ -81,6 +81,7 @@ pip install mistral-vibe
   - [Custom Agent Configurations](#custom-agent-configurations)
   - [Tool Management](#tool-management)
   - [MCP Server Configuration](#mcp-server-configuration)
+  - [LSP Integration](#lsp-integration)
   - [Session Management](#session-management)
   - [Update Settings](#update-settings)
   - [Custom Vibe Home Directory](#custom-vibe-home-directory)
@@ -612,6 +613,80 @@ url = "http://localhost:8000"
 env = { "DEBUG" = "1", "LOG_LEVEL" = "info" }
 startup_timeout_sec = 15
 tool_timeout_sec = 120
+```
+
+### LSP Integration
+
+Vibe can connect to Language Server Protocol (LSP) servers so the agent gets IDE-grade code intelligence: diagnostics, hover docs, go-to-definition, find-all-references, and workspace-wide rename.
+
+#### Install language servers
+
+```bash
+# Python (pyright)
+npm install -g pyright
+
+# TypeScript / JavaScript
+npm install -g typescript typescript-language-server
+```
+
+#### Configure in `~/.vibe/config.toml`
+
+```toml
+[lsp]
+mode = "auto"        # off | manual | auto | strict
+trigger = "on-edit"  # on-edit | on-finish
+min_severity = "warning"
+max_diagnostics_shown = 20
+
+[[lsp.servers]]
+name = "pyright"
+command = ["pyright", "--stdio"]
+extensions = [".py"]
+language_ids = ["python"]
+
+[[lsp.servers]]
+name = "ts"
+command = ["typescript-language-server", "--stdio"]
+extensions = [".ts", ".tsx", ".js", ".jsx"]
+language_ids = ["typescript"]
+```
+
+#### Mode ladder
+
+| Mode | Auto-diagnostics after edit | Agent behavior |
+|---|---|---|
+| `off` | none | LSP tools hidden |
+| `manual` | none | Agent calls LSP tools when it chooses |
+| `auto` | yes — shows new/fixed delta | Agent receives diagnostic summary |
+| `strict` | yes | Agent is blocked from finishing until new errors are fixed |
+
+#### Agent-facing tools
+
+When LSP is active, the following tools are available to the agent:
+
+| Tool | What it does |
+|---|---|
+| `lsp_diagnostics` | Errors and warnings for a file |
+| `lsp_hover` | Type info / doc at a position |
+| `lsp_definition` | Jump to definition |
+| `lsp_references` | All references to a symbol |
+| `lsp_rename` | Workspace-wide rename (returns edit, applied by agent) |
+| `lsp_document_symbols` | File outline (classes, functions, variables) |
+
+#### Human-facing slash commands
+
+```
+/lsp                          Server status, mode, indexed file count
+/lsp mode <off|manual|auto|strict>   Change mode for this session
+/lsp on / /lsp off            Quick enable / disable
+/lsp restart [server]         Restart one or all servers
+/lsp doctor                   Binary path, version, venv, health check
+
+/diag [file]                  Diagnostics for a file
+/refs file.py:42:8            Find all references at position
+/def  file.py:42:8            Go to definition
+/sym  file.py                 File outline (symbols)
+/explain reportUndefinedVar   Explain a diagnostic code
 ```
 
 ### Hooks (Experimental)

@@ -305,6 +305,32 @@ def _get_headless_section() -> str:
     )
 
 
+def _get_lsp_section(config: VibeConfig) -> str | None:
+    from vibe.core.lsp._config import LSPMode
+
+    lsp = config.lsp
+    if not lsp.is_active():
+        return None
+    names = [s.name for s in lsp.active_servers()]
+    if not names:
+        return None
+    mode_note = {
+        LSPMode.MANUAL: "Call them when you judge it useful.",
+        LSPMode.AUTO: "Diagnostics run automatically after edits — you will see the delta.",
+        LSPMode.STRICT: "New errors after an edit block you from finishing. Fix them first.",
+    }.get(lsp.mode, "")
+    return (
+        "# Language Server Protocol (LSP)\n\n"
+        f"Language servers active: {', '.join(names)}. {mode_note}\n"
+        "- After editing code: `lsp_diagnostics` to check for new errors.\n"
+        "- Before renaming: `lsp_references` to see blast radius, then `lsp_rename` for the workspace-edit.\n"
+        "- Type/doc at a position: `lsp_hover`.\n"
+        "- Go to source: `lsp_definition`.\n"
+        "- File outline: `lsp_document_symbols`.\n"
+        "- `lsp_rename` returns a WorkspaceEdit — apply it with the `edit` tool."
+    )
+
+
 def get_universal_system_prompt(  # noqa: PLR0912
     tool_manager: ToolManager,
     config: VibeConfig,
@@ -345,6 +371,9 @@ def get_universal_system_prompt(  # noqa: PLR0912
             sections.append(subagents_section)
 
         sections.extend(filter(None, [_get_scratchpad_section(scratchpad_dir)]))
+        lsp_section = _get_lsp_section(config)
+        if lsp_section:
+            sections.append(lsp_section)
 
     if config.include_project_context:
         is_dangerous, reason = is_dangerous_directory()

@@ -99,6 +99,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     WhatsNewMessage,
 )
 from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
+from vibe.cli.textual_ui.widgets.lsp_status_chip import LSPStatusChip
 from vibe.cli.textual_ui.widgets.narrator_status import NarratorStatus
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
@@ -605,6 +606,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         with Horizontal(id="loading-area"):
             yield NarratorStatus(self._narrator_manager)
+            yield LSPStatusChip(id="lsp-status-chip")
             yield Static(id="loading-area-content")
             yield FeedbackBar()
 
@@ -3397,6 +3399,318 @@ class VibeApp(App):  # noqa: PLR0904
     async def _switch_to_accept_edits_mode(self, cmd_args: str = "") -> None:
         await self._switch_to_named_agent(BuiltinAgentName.ACCEPT_EDITS)
 
+    # ── LSP commands ─────────────────────────────────────────────────────────
+
+    async def _lsp_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.lsp import get_lsp_manager
+        from vibe.core.lsp._client import ServerStatus
+
+        lsp = get_lsp_manager()
+        parts = cmd_args.strip().split(None, 1)
+        sub = parts[0].lower() if parts else ""
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub in ("on",):
+            sub, arg = "mode", "auto"
+        if sub in ("off",):
+            sub, arg = "mode", "off"
+
+        if sub == "mode" and arg:
+            from vibe.core.lsp._config import LSPMode
+            valid_modes = [m.value for m in LSPMode]
+            if arg not in valid_modes:
+                await self._mount_and_scroll(ErrorMessage(
+                    f"Unknown mode '{arg}'. Valid modes: {', '.join(valid_modes)}"
+                ))
+                return
+            self.agent_loop._base_config.lsp.mode = LSPMode(arg)
+            await self._mount_and_scroll(UserCommandMessage(f"LSP mode set to `{arg}`."))
+            return
+
+        if sub == "restart":
+            if lsp is None:
+                await self._mount_and_scroll(ErrorMessage("LSP not started."))
+                return
+            name = arg or None
+            if name:
+                await lsp.restart_server(name)
+                await self._mount_and_scroll(UserCommandMessage(f"LSP: restarted `{name}`."))
+            else:
+                cfg = self.agent_loop._base_config.lsp
+                for s in cfg.active_servers():
+                    await lsp.restart_server(s.name)
+                await self._mount_and_scroll(UserCommandMessage("LSP: restarted all servers."))
+            return
+
+        if sub == "servers":
+            if lsp is None:
+                await self._mount_and_scroll(UserCommandMessage("LSP not started. Configure `lsp.servers` in config.toml."))
+                return
+            lines = ["## LSP Servers\n"]
+            for entry in lsp.status_summary():
+                icon = {"ready": "✓", "indexing": "⟳", "failed": "✗", "stopped": "○", "starting": "⟳"}.get(entry["status"], "?")
+                lines.append(f"- **{entry['name']}** [{icon} {entry['status']}]  extensions: {', '.join(entry['extensions'])}")
+            await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+            return
+
+        if sub == "doctor":
+            await self._lsp_doctor(arg)
+            return
+
+        # Default: status dashboard
+        cfg = self.agent_loop._base_config.lsp
+        if not cfg.is_active():
+            await self._mount_and_scroll(UserCommandMessage(
+                "LSP is not configured. Add `[[lsp.servers]]` entries to your config.toml."
+            ))
+            return
+        lines = [f"## LSP Status\n\n**Mode:** `{cfg.mode}`  |  **Trigger:** `{cfg.trigger}`"]
+        if lsp:
+            for entry in lsp.status_summary():
+                icon = {"ready": "✓", "indexing": "⟳", "failed": "✗", "stopped": "○", "starting": "⟳"}.get(entry["status"], "?")
+                lines.append(f"- **{entry['name']}**  {icon} {entry['status']}")
+        else:
+            for s in cfg.active_servers():
+                lines.append(f"- **{s.name}**  ○ not started")
+        lines.append("\n**Commands:** `/lsp mode <mode>`, `/lsp restart [server]`, `/lsp doctor`")
+        await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+
+    async def _lsp_doctor(self, server_filter: str = "") -> None:
+        import shutil
+        import subprocess
+        from vibe.core.lsp import get_lsp_manager
+
+        cfg = self.agent_loop._base_config.lsp
+        if not cfg.servers:
+            await self._mount_and_scroll(UserCommandMessage("No LSP servers configured."))
+            return
+
+        lsp = get_lsp_manager()
+        lines = ["## LSP Doctor\n"]
+        for s in cfg.servers:
+            if server_filter and s.name != server_filter:
+                continue
+            lines.append(f"**{s.name}**")
+            binary = s.command[0]
+            path = shutil.which(binary)
+            if path:
+                try:
+                    ver = subprocess.run(
+                        [binary, "--version"], capture_output=True, text=True, timeout=3
+                    )
+                    version = ver.stdout.strip() or ver.stderr.strip() or "unknown"
+                except Exception:
+                    version = "unknown"
+                lines.append(f"  binary    {path}  ({version})")
+            else:
+                lines.append(f"  binary    **not found**")
+                if "pyright" in binary:
+                    lines.append("  fix       `npm install -g pyright`")
+                elif "typescript" in binary:
+                    lines.append("  fix       `npm install -g typescript-language-server typescript`")
+            if lsp:
+                status = lsp.get_client_status(s.name)
+                if status is not None:
+                    lines.append(f"  status    {status}")
+            lines.append("")
+        await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+
+    async def _lsp_diag_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.lsp import get_lsp_manager
+        from vibe.core.lsp._diagnostics import format_diagnostic_line
+
+        lsp = get_lsp_manager()
+        if lsp is None:
+            await self._mount_and_scroll(ErrorMessage("LSP not started."))
+            return
+
+        file_path = cmd_args.strip()
+        if not file_path:
+            await self._mount_and_scroll(ErrorMessage("Usage: /diag <file>"))
+            return
+
+        from pathlib import Path as _Path
+        resolved = _Path(file_path).resolve()
+        if not resolved.exists():
+            await self._mount_and_scroll(ErrorMessage(f"File not found: {file_path}"))
+            return
+
+        client = lsp.get_client_for_file(str(resolved))
+        if client is None:
+            await self._mount_and_scroll(ErrorMessage(f"No LSP server for '{resolved.suffix}' files."))
+            return
+
+        try:
+            await lsp.open_or_sync_file(str(resolved))
+            diags = await lsp.fetch_diagnostics(str(resolved))
+        except Exception as exc:
+            await self._mount_and_scroll(ErrorMessage(f"LSP error: {exc}"))
+            return
+
+        if not diags:
+            await self._mount_and_scroll(UserCommandMessage(f"✓ No issues in `{resolved.name}`."))
+            return
+
+        lines = [f"## Diagnostics: {resolved.name}\n"]
+        for d in diags:
+            lines.append(format_diagnostic_line(d))
+        await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+
+    async def _lsp_refs_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.lsp import get_lsp_manager
+
+        lsp = get_lsp_manager()
+        if lsp is None:
+            await self._mount_and_scroll(ErrorMessage("LSP not started."))
+            return
+
+        parsed = _parse_file_position(cmd_args.strip())
+        if parsed is None:
+            await self._mount_and_scroll(ErrorMessage("Usage: /refs file.py:line:col"))
+            return
+
+        file_path, line, col = parsed
+        client = lsp.get_client_for_file(file_path)
+        if client is None:
+            from pathlib import Path as _Path
+            await self._mount_and_scroll(ErrorMessage(f"No LSP server for '{_Path(file_path).suffix}' files."))
+            return
+
+        try:
+            await lsp.open_or_sync_file(file_path)
+            uri = lsp.path_to_uri(file_path)
+            result = await client.request("textDocument/references", {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": col},
+                "context": {"includeDeclaration": True},
+            })
+        except Exception as exc:
+            await self._mount_and_scroll(ErrorMessage(f"LSP error: {exc}"))
+            return
+
+        if not result:
+            await self._mount_and_scroll(UserCommandMessage("No references found."))
+            return
+
+        from urllib.parse import unquote
+        from pathlib import Path as _Path
+        lines = [f"## {len(result)} reference{'s' if len(result) != 1 else ''}\n"]
+        for loc in result[:50]:
+            start = loc.get("range", {}).get("start", {})
+            ref_uri = loc.get("uri", "")
+            ref_path = ref_uri[7:] if ref_uri.startswith("file://") else ref_uri
+            ref_path = unquote(ref_path)
+            ref_line = start.get("line", 0) + 1
+            ref_col = start.get("character", 0)
+            lines.append(f"  {_Path(ref_path).name}:{ref_line}:{ref_col}")
+        if len(result) > 50:
+            lines.append(f"  +{len(result) - 50} more")
+        await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+
+    async def _lsp_def_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.lsp import get_lsp_manager
+        from urllib.parse import unquote
+
+        lsp = get_lsp_manager()
+        if lsp is None:
+            await self._mount_and_scroll(ErrorMessage("LSP not started."))
+            return
+
+        parsed = _parse_file_position(cmd_args.strip())
+        if parsed is None:
+            await self._mount_and_scroll(ErrorMessage("Usage: /def file.py:line:col"))
+            return
+
+        file_path, line, col = parsed
+        client = lsp.get_client_for_file(file_path)
+        if client is None:
+            from pathlib import Path as _Path
+            await self._mount_and_scroll(ErrorMessage(f"No LSP server for '{_Path(file_path).suffix}' files."))
+            return
+
+        try:
+            await lsp.open_or_sync_file(file_path)
+            uri = lsp.path_to_uri(file_path)
+            result = await client.request("textDocument/definition", {
+                "textDocument": {"uri": uri},
+                "position": {"line": line - 1, "character": col},
+            })
+        except Exception as exc:
+            await self._mount_and_scroll(ErrorMessage(f"LSP error: {exc}"))
+            return
+
+        locations = result if isinstance(result, list) else ([result] if result else [])
+        if not locations:
+            await self._mount_and_scroll(UserCommandMessage("No definition found."))
+            return
+
+        lines = ["## Definition\n"]
+        for loc in locations:
+            start = loc.get("range", {}).get("start", {})
+            def_uri = loc.get("uri", "")
+            def_path = def_uri[7:] if def_uri.startswith("file://") else def_uri
+            def_path = unquote(def_path)
+            def_line = start.get("line", 0) + 1
+            def_col = start.get("character", 0)
+            lines.append(f"  {def_path}:{def_line}:{def_col}")
+        await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+
+    async def _lsp_sym_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.lsp import get_lsp_manager
+        from vibe.core.tools.builtins.lsp_document_symbols import _normalize_symbols
+
+        lsp = get_lsp_manager()
+        if lsp is None:
+            await self._mount_and_scroll(ErrorMessage("LSP not started."))
+            return
+
+        file_path = cmd_args.strip()
+        if not file_path:
+            await self._mount_and_scroll(ErrorMessage("Usage: /sym <file>"))
+            return
+
+        from pathlib import Path as _Path
+        resolved = _Path(file_path).resolve()
+        client = lsp.get_client_for_file(str(resolved))
+        if client is None:
+            await self._mount_and_scroll(ErrorMessage(f"No LSP server for '{resolved.suffix}' files."))
+            return
+
+        try:
+            await lsp.open_or_sync_file(str(resolved))
+            uri = lsp.path_to_uri(str(resolved))
+            result = await client.request("textDocument/documentSymbol", {
+                "textDocument": {"uri": uri},
+            })
+        except Exception as exc:
+            await self._mount_and_scroll(ErrorMessage(f"LSP error: {exc}"))
+            return
+
+        symbols = _normalize_symbols(result or [])
+        if not symbols:
+            await self._mount_and_scroll(UserCommandMessage(f"No symbols found in `{resolved.name}`."))
+            return
+
+        lines = [f"## Symbols: {resolved.name}\n"]
+        for sym in symbols:
+            indent = "  " * sym.get("depth", 0)
+            lines.append(f"{indent}{sym['kind']:14} {sym['name']}  (line {sym['line']})")
+        await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+
+    async def _lsp_explain_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        code = cmd_args.strip()
+        if not code:
+            await self._mount_and_scroll(ErrorMessage("Usage: /explain <diagnostic-code>"))
+            return
+        explanations = _LSP_DIAGNOSTIC_CODES.get(code)
+        if explanations:
+            await self._mount_and_scroll(UserCommandMessage(f"**{code}**: {explanations}"))
+        else:
+            await self._mount_and_scroll(UserCommandMessage(
+                f"No built-in explanation for `{code}`. "
+                "Search the pyright or typescript-language-server documentation."
+            ))
+
     async def action_toggle_debug_console(self, **kwargs: Any) -> None:
         if self._debug_console is not None:
             await self._debug_console.remove()
@@ -3701,6 +4015,46 @@ class VibeApp(App):  # noqa: PLR0904
             audio_player=AudioPlayer(),
             telemetry_client=self.agent_loop.telemetry_client,
         )
+
+
+def _parse_file_position(text: str) -> tuple[str, int, int] | None:
+    """Parse 'file.py:line:col' into (path, line, col). Returns None on failure."""
+    parts = text.rsplit(":", 2)
+    if len(parts) == 3:
+        try:
+            return parts[0], int(parts[1]), int(parts[2])
+        except ValueError:
+            pass
+    if len(parts) == 2:
+        try:
+            return parts[0], int(parts[1]), 0
+        except ValueError:
+            pass
+    return None
+
+
+_LSP_DIAGNOSTIC_CODES: dict[str, str] = {
+    "reportUndefinedVariable": "Variable is used but never defined in this scope.",
+    "reportMissingImports": "Import cannot be resolved — the module is not installed or not on the path.",
+    "reportMissingModuleSource": "Module stubs found but source is missing — install the full package.",
+    "reportAttributeAccessIssue": "Attribute does not exist on the type or its base classes.",
+    "reportCallIssue": "Function call has wrong argument types or arity.",
+    "reportReturnType": "Return type does not match the function's declared return annotation.",
+    "reportArgumentType": "Argument type is incompatible with the parameter type.",
+    "reportIndexIssue": "Subscript index is not compatible with the type.",
+    "reportOperatorIssue": "Operator is not defined for the given types.",
+    "reportGeneralTypeIssues": "General type violation — read the full message for details.",
+    "reportMissingTypeArgument": "Generic type requires type arguments (e.g. list[str] not list).",
+    "reportUnusedImport": "Import is never used in this file.",
+    "reportUnusedVariable": "Variable is assigned but never read.",
+    "reportPrivateUsage": "Private member (prefixed with _) is accessed from outside its class.",
+    "noImplicitAny": "TypeScript: implicit 'any' type. Add an explicit type annotation.",
+    "strictNullChecks": "TypeScript: value may be null or undefined where not expected.",
+    "TS2304": "TypeScript: cannot find name — symbol is not defined in scope.",
+    "TS2345": "TypeScript: argument type is not assignable to parameter type.",
+    "TS2322": "TypeScript: type is not assignable to the expected type.",
+    "TS2339": "TypeScript: property does not exist on the type.",
+}
 
 
 def run_textual_ui(

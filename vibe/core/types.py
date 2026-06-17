@@ -492,6 +492,20 @@ class SessionTitleUpdatedEvent(BaseEvent):
     title: str
 
 
+class LspDeltaEvent(BaseEvent):
+    """Emitted after an Edit/WriteFile tool call when LSP mode is auto or strict.
+
+    Carries the delta (new errors, fixed errors) and the formatted text for display.
+    The TUI uses this to render the diagnostics panel; the agent loop appends
+    ``agent_context`` to the tool result text so the model is aware of new errors.
+    """
+
+    file_path: str
+    display_text: str
+    agent_context: str
+    has_new_errors: bool
+
+
 class OutputFormat(StrEnum):
     TEXT = auto()
     JSON = auto()

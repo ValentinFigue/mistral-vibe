@@ -11,6 +11,8 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
+
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
 from vibe.core.paths import DEFAULT_TOOL_DIR
@@ -60,6 +62,10 @@ def _compute_module_name(path: Path) -> str:
 
 class NoSuchToolError(Exception):
     """Exception raised when a tool is not found."""
+
+
+class ToolConfigError(Exception):
+    """Exception raised when a tool's config contains invalid values."""
 
 
 class ToolManager:
@@ -428,7 +434,13 @@ class ToolManager:
         merged_dict = {**default_config.model_dump(), **(user_overrides or {})}
         if permission_override is not None:
             merged_dict["permission"] = permission_override.value
-        return config_class.model_validate(merged_dict)
+        try:
+            return config_class.model_validate(merged_dict)
+        except ValidationError as exc:
+            raise ToolConfigError(
+                f"Invalid config for tool '{tool_name}' in your settings file. "
+                f"Check the [tools.{tool_name}] section.\nDetails: {exc}"
+            ) from exc
 
     def get(self, tool_name: str) -> BaseTool:
         """Get a tool instance, creating it lazily on first call.

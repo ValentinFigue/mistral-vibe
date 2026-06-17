@@ -15,7 +15,7 @@ from textual.widgets import Static
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.core.config import VibeConfig
-from vibe.core.tools.permissions import RequiredPermission
+from vibe.core.tools.permissions import RequiredPermission, ScopeOption
 
 _INPUT_GRACE_PERIOD_S = 0.5
 
@@ -32,10 +32,11 @@ class ApprovalApp(Container):
         Binding("enter", "select", "Select", show=False),
         Binding("1", "select_1", "Yes", show=False),
         Binding("y", "select_1", "Yes", show=False),
-        Binding("2", "select_2", "Always Tool Session", show=False),
-        Binding("3", "select_3", "Always Permanent", show=False),
+        Binding("2", "select_2", "Allow this session", show=False),
+        Binding("3", "select_3", "Always allow", show=False),
         Binding("4", "select_4", "No", show=False),
         Binding("n", "select_4", "No", show=False),
+        Binding("s", "toggle_scope", "Switch scope", show=False),
     ]
 
     class ApprovalGranted(Message):
@@ -86,12 +87,14 @@ class ApprovalApp(Container):
         self.tool_args = tool_args
         self.config = config
         self.required_permissions = required_permissions or []
+        self._scope_index: int = 0
         self.selected_option = 0
         self.content_container: Vertical | None = None
         self.title_widget = NoMarkupStatic(
             self._build_title(), classes="approval-title"
         )
         self.tool_info_container: Vertical | None = None
+        self._scope_widget: NoMarkupStatic = NoMarkupStatic("", classes="approval-scope")
         self.option_widgets: list[Static] = []
         self.help_widget: Static | None = None
         self._mount_time: float = 0.0
@@ -108,6 +111,7 @@ class ApprovalApp(Container):
 
         with Vertical(id="approval-options"):
             yield NoMarkupStatic("")
+            yield self._scope_widget
             for _ in range(self.NUM_OPTIONS):
                 widget = NoMarkupStatic("", classes="approval-option")
                 self.option_widgets.append(widget)
@@ -126,6 +130,12 @@ class ApprovalApp(Container):
     async def on_mount(self) -> None:
         self._mount_time = time.monotonic()
         await self._update_tool_info()
+        rp_with_ladder = next((rp for rp in self.required_permissions if rp.scope_ladder), None)
+        if rp_with_ladder:
+            self._scope_index = rp_with_ladder.default_scope_index
+        else:
+            self._scope_index = min(1, len(self._get_ladder()) - 1)
+        self._update_scope_widget()
         self._update_options()
         self.focus()
         self._recompute_height()
@@ -167,11 +177,68 @@ class ApprovalApp(Container):
         await self.tool_info_container.remove_children()
         await self.tool_info_container.mount(approval_widget)
 
+    def _get_ladder(self) -> list[ScopeOption]:
+        for rp in self.required_permissions:
+            if rp.scope_ladder:
+                return rp.scope_ladder
+        if self.required_permissions:
+            patterns = list(dict.fromkeys(
+                rp.session_pattern for rp in self.required_permissions if rp.session_pattern != "*"
+            ))
+            if patterns:
+                return [
+                    ScopeOption(label=f"Pattern: {patterns[0]}", pattern=patterns[0]),
+                    ScopeOption(label=f"Full tool: {self.tool_name}", pattern=None),
+                ]
+        return [ScopeOption(label=f"Full tool: {self.tool_name}", pattern=None)]
+
+    def _selected_rung(self) -> ScopeOption:
+        return self._get_ladder()[self._scope_index]
+
+    def _get_active_permissions(self) -> list[RequiredPermission]:
+        rung = self._selected_rung()
+        if rung.pattern is None:
+            return []  # full-tool → approve_always([]) sets tool ALWAYS
+        return [
+            rp.model_copy(update={"session_pattern": rung.pattern})
+            for rp in self.required_permissions
+        ]
+
+    def _scope_hint_text(self) -> str:
+        if not self.required_permissions:
+            return ""
+        rung = self._selected_rung()
+        if rung.pattern is None:
+            return f"  Full tool: {self.tool_name}"
+        return f"  {rung.pattern}"
+
+    def _update_scope_widget(self) -> None:
+        if not self.required_permissions:
+            self._scope_widget.update("")
+            return
+        ladder = self._get_ladder()
+        if len(ladder) <= 1:
+            self._scope_widget.update("")
+            return
+        rung = ladder[self._scope_index]
+        self._scope_widget.update(f"  Scope: {rung.label}   [s to change]")
+
+    def action_toggle_scope(self) -> None:
+        if not self.required_permissions:
+            return
+        self._scope_index = (self._scope_index + 1) % len(self._get_ladder())
+        self._update_scope_widget()
+        self._update_options()
+        self._recompute_height()
+
     def _update_options(self) -> None:
+        hint = self._scope_hint_text()
+        # Option 1 (Allow once) posts no rule, so scope is irrelevant — no hint shown.
+        suffix = f"\n{hint}" if hint else ""
         options = [
             ("Allow once", "yes"),
-            ("Allow for remainder of this session", "yes"),
-            ("Always allow", "yes"),
+            (f"Allow for remainder of this session{suffix}", "yes"),
+            (f"Always allow (saves to config){suffix}", "yes"),
             ("Deny", "no"),
         ]
 
@@ -248,7 +315,7 @@ class ApprovalApp(Container):
                     self.ApprovalGrantedAlwaysTool(
                         tool_name=self.tool_name,
                         tool_args=self.tool_args,
-                        required_permissions=self.required_permissions,
+                        required_permissions=self._get_active_permissions(),
                     )
                 )
             case 2:
@@ -256,7 +323,7 @@ class ApprovalApp(Container):
                     self.ApprovalGrantedAlwaysPermanent(
                         tool_name=self.tool_name,
                         tool_args=self.tool_args,
-                        required_permissions=self.required_permissions,
+                        required_permissions=self._get_active_permissions(),
                     )
                 )
             case 3:

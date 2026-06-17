@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from enum import StrEnum, auto
 import fnmatch
+import re as _re
 
 from pydantic import BaseModel, Field
 
@@ -16,11 +17,18 @@ class PermissionScope(StrEnum):
     URL_PATTERN = auto()
 
 
+class ScopeOption(BaseModel):
+    label: str
+    pattern: str | None  # None = full-tool sentinel → approve_always([]) → tool ALWAYS
+
+
 class RequiredPermission(BaseModel):
     scope: PermissionScope
     invocation_pattern: str
     session_pattern: str
     label: str
+    scope_ladder: list[ScopeOption] = Field(default_factory=list)
+    default_scope_index: int = 0
 
 
 class PermissionContext(BaseModel):
@@ -36,7 +44,14 @@ class ApprovedRule(BaseModel):
 
 
 def wildcard_match(text: str, pattern: str) -> bool:
-    """If pattern ends with " *", trailing args are optional (match with or without)."""
+    """Match text against a session rule pattern.
+
+    Prefix 're:' triggers regex search. Otherwise uses fnmatch glob matching
+    with one extension: if the pattern ends with ' *', trailing args are optional
+    (the pattern matches both with and without trailing arguments).
+    """
+    if pattern.startswith("re:"):
+        return bool(_re.search(pattern[3:], text))
     if fnmatch.fnmatch(text, pattern):
         return True
     if pattern.endswith(" *") and fnmatch.fnmatch(text, pattern[:-2]):

@@ -26,6 +26,7 @@ from vibe.core.tools.permissions import (
     PermissionContext,
     PermissionScope,
     RequiredPermission,
+    ScopeOption,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import is_path_within_workdir
@@ -319,14 +320,44 @@ class Bash(
         return any(predicate in command for predicate in _FIND_EXECUTION_PREDICATES)
 
     @staticmethod
+    def _build_bash_scope_ladder(
+        invocation: str, session_pattern: str, tool_name: str
+    ) -> tuple[list[ScopeOption], int]:
+        options: list[ScopeOption] = []
+        seen: set[str | None] = set()
+
+        options.append(ScopeOption(label=f"This exact command: {invocation}", pattern=invocation))
+        seen.add(invocation)
+
+        added_session_rung = False
+        if session_pattern not in seen:
+            prefix = session_pattern[:-2] if session_pattern.endswith(" *") else session_pattern
+            options.append(ScopeOption(label=f"Any `{prefix}` command", pattern=session_pattern))
+            seen.add(session_pattern)
+            added_session_rung = True
+
+        options.append(ScopeOption(label=f"Any {tool_name} command (full tool)", pattern=None))
+
+        default = 1 if added_session_rung else 0
+        return options, default
+
+    @staticmethod
     def _build_command_required_permission(
-        invocation_pattern: str, session_pattern: str, label: str
+        invocation_pattern: str, session_pattern: str, label: str, tool_name: str = "bash"
     ) -> RequiredPermission:
+        if invocation_pattern != session_pattern:
+            ladder, default_idx = Bash._build_bash_scope_ladder(
+                invocation_pattern, session_pattern, tool_name
+            )
+        else:
+            ladder, default_idx = [], 0
         return RequiredPermission(
             scope=PermissionScope.COMMAND_PATTERN,
             invocation_pattern=invocation_pattern,
             session_pattern=session_pattern,
             label=label,
+            scope_ladder=ladder,
+            default_scope_index=default_idx,
         )
 
     @staticmethod

@@ -15,7 +15,7 @@ from textual.widgets import Static
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.core.config import VibeConfig
-from vibe.core.tools.permissions import RequiredPermission
+from vibe.core.tools.permissions import RequiredPermission, ScopeOption
 
 _INPUT_GRACE_PERIOD_S = 0.5
 
@@ -87,7 +87,7 @@ class ApprovalApp(Container):
         self.tool_args = tool_args
         self.config = config
         self.required_permissions = required_permissions or []
-        self._use_specific_scope: bool = False
+        self._scope_index: int = 0
         self.selected_option = 0
         self.content_container: Vertical | None = None
         self.title_widget = NoMarkupStatic(
@@ -130,6 +130,11 @@ class ApprovalApp(Container):
     async def on_mount(self) -> None:
         self._mount_time = time.monotonic()
         await self._update_tool_info()
+        rp_with_ladder = next((rp for rp in self.required_permissions if rp.scope_ladder), None)
+        if rp_with_ladder:
+            self._scope_index = rp_with_ladder.default_scope_index
+        else:
+            self._scope_index = min(1, len(self._get_ladder()) - 1)
         self._update_scope_widget()
         self._update_options()
         self.focus()
@@ -172,55 +177,56 @@ class ApprovalApp(Container):
         await self.tool_info_container.remove_children()
         await self.tool_info_container.mount(approval_widget)
 
-    def _get_active_permissions(self) -> list[RequiredPermission]:
-        """Return required_permissions adjusted for the current scope mode.
+    def _get_ladder(self) -> list[ScopeOption]:
+        for rp in self.required_permissions:
+            if rp.scope_ladder:
+                return rp.scope_ladder
+        if self.required_permissions:
+            patterns = list(dict.fromkeys(
+                rp.session_pattern for rp in self.required_permissions if rp.session_pattern != "*"
+            ))
+            if patterns:
+                return [
+                    ScopeOption(label=f"Pattern: {patterns[0]}", pattern=patterns[0]),
+                    ScopeOption(label=f"Full tool: {self.tool_name}", pattern=None),
+                ]
+        return [ScopeOption(label=f"Full tool: {self.tool_name}", pattern=None)]
 
-        In specific mode, collapses session_pattern to the exact invocation so that
-        rules created downstream only match the precise command or URL, not the
-        generalized wildcard pattern.
-        """
-        if not self._use_specific_scope:
-            return self.required_permissions
+    def _selected_rung(self) -> ScopeOption:
+        return self._get_ladder()[self._scope_index]
+
+    def _get_active_permissions(self) -> list[RequiredPermission]:
+        rung = self._selected_rung()
+        if rung.pattern is None:
+            return []  # full-tool → approve_always([]) sets tool ALWAYS
         return [
-            rp.model_copy(update={"session_pattern": rp.invocation_pattern})
+            rp.model_copy(update={"session_pattern": rung.pattern})
             for rp in self.required_permissions
         ]
 
     def _scope_hint_text(self) -> str:
-        """Return the hint text for options 2/3 based on the active scope mode."""
         if not self.required_permissions:
             return ""
-        perms = self._get_active_permissions()
-        patterns = list(
-            dict.fromkeys(rp.session_pattern for rp in perms if rp.session_pattern != "*")
-        )
-        if not patterns:
-            return ""
-        label = "Specific" if self._use_specific_scope else "Pattern"
-        return f"  {label}: {', '.join(patterns)}"
+        rung = self._selected_rung()
+        if rung.pattern is None:
+            return f"  Full tool: {self.tool_name}"
+        return f"  {rung.pattern}"
 
     def _update_scope_widget(self) -> None:
-        """Refresh the scope indicator line above the options."""
         if not self.required_permissions:
             self._scope_widget.update("")
             return
-        perms = self._get_active_permissions()
-        patterns = list(
-            dict.fromkeys(rp.session_pattern for rp in perms if rp.session_pattern != "*")
-        )
-        if not patterns:
+        ladder = self._get_ladder()
+        if len(ladder) <= 1:
             self._scope_widget.update("")
             return
-        label = "Specific" if self._use_specific_scope else "Pattern"
-        toggle_hint = "pattern" if self._use_specific_scope else "specific"
-        self._scope_widget.update(
-            f"  Scope: {label} ({', '.join(patterns)})   [s to use {toggle_hint}]"
-        )
+        rung = ladder[self._scope_index]
+        self._scope_widget.update(f"  Scope: {rung.label}   [s to change]")
 
     def action_toggle_scope(self) -> None:
         if not self.required_permissions:
             return
-        self._use_specific_scope = not self._use_specific_scope
+        self._scope_index = (self._scope_index + 1) % len(self._get_ladder())
         self._update_scope_widget()
         self._update_options()
         self._recompute_height()

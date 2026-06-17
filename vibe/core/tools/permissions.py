@@ -17,11 +17,18 @@ class PermissionScope(StrEnum):
     URL_PATTERN = auto()
 
 
+class ScopeOption(BaseModel):
+    label: str
+    pattern: str | None  # None = full-tool sentinel → approve_always([]) → tool ALWAYS
+
+
 class RequiredPermission(BaseModel):
     scope: PermissionScope
     invocation_pattern: str
     session_pattern: str
     label: str
+    scope_ladder: list[ScopeOption] = Field(default_factory=list)
+    default_scope_index: int = 0
 
 
 class PermissionContext(BaseModel):

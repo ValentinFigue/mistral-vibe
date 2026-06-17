@@ -314,20 +314,75 @@ def _get_lsp_section(config: VibeConfig) -> str | None:
     names = [s.name for s in lsp.active_servers()]
     if not names:
         return None
-    mode_note = {
-        LSPMode.MANUAL: "Call them when you judge it useful.",
-        LSPMode.AUTO: "Diagnostics run automatically after edits — you will see the delta.",
-        LSPMode.STRICT: "New errors after an edit block you from finishing. Fix them first.",
+    diag_rule = {
+        LSPMode.AUTO: (
+            "Diagnostics run automatically after edits — react to errors shown; "
+            "fix them before continuing."
+        ),
+        LSPMode.STRICT: (
+            "Diagnostics run automatically after edits — new errors block completion; "
+            "fix them before declaring done."
+        ),
+        LSPMode.MANUAL: (
+            "After editing any code file, call `lsp_diagnostics` on it before moving on."
+        ),
     }.get(lsp.mode, "")
     return (
-        "# Language Server Protocol (LSP)\n\n"
-        f"Language servers active: {', '.join(names)}. {mode_note}\n"
-        "- After editing code: `lsp_diagnostics` to check for new errors.\n"
-        "- Before renaming: `lsp_references` to see blast radius, then `lsp_rename` for the workspace-edit.\n"
-        "- Type/doc at a position: `lsp_hover`.\n"
-        "- Go to source: `lsp_definition`.\n"
-        "- File outline: `lsp_document_symbols`.\n"
-        "- `lsp_rename` returns a WorkspaceEdit — apply it with the `edit` tool."
+        "# Code Intelligence (LSP)\n\n"
+        f"Language servers active: {', '.join(names)}.\n\n"
+        "## Navigation — use LSP instead of grep/read for these queries\n\n"
+        "| You want to…                               | Use                    | NOT          |\n"
+        "|--------------------------------------------|------------------------|--------------|\n"
+        "| Where is X defined                         | `lsp_definition`       | grep         |\n"
+        "| Every place X is used / blast radius       | `lsp_references`       | grep         |\n"
+        "| The type or signature of X                 | `lsp_hover`            | reading code |\n"
+        "| Outline of a large or unfamiliar file      | `lsp_document_symbols` | reading file |\n"
+        "| Rename X everywhere                        | `lsp_rename`           | edit/sed     |\n\n"
+        "**Position requirement**: LSP tools take file + line + character, not a symbol name. "
+        "If you only have a name, locate it first via `lsp_document_symbols` or grep to get a "
+        "line:character, then call the LSP tool at that position. "
+        "Grep-as-locator is correct; grep-as-final-answer to the queries above is not.\n\n"
+        "**Short files**: just read them — `lsp_document_symbols` is for large or unfamiliar files. "
+        "Don't hover on symbols you already understand.\n\n"
+        f"## Verification\n{diag_rule}\n"
+        "Before renaming or deleting a symbol: `lsp_references` to see blast radius.\n"
+        "`lsp_rename` returns a WorkspaceEdit — apply it with the `edit` tool, file by file.\n"
+        "When bonsai is available, prefer `pyrename`/`tsrename` over `lsp_rename` — see below.\n"
+    )
+
+
+def _get_bonsai_section(config: VibeConfig) -> str | None:
+    has_py = any("bonsai" in s.name and "py" in s.name for s in config.mcp_servers)
+    has_ts = any("bonsai" in s.name and "ts" in s.name for s in config.mcp_servers)
+    if not has_py and not has_ts:
+        return None
+
+    rows = ""
+    if has_py:
+        rows += (
+            "| Rename a symbol (Python)                      | `sed`/edit  | `pyrename`     |\n"
+            "| Move a file, rewrite imports (Python)         | `mv`        | `pymove`       |\n"
+            "| Change a function signature everywhere (Py)   | manual      | `pysignature`  |\n"
+            "| Find all references by name (Python)          | grep        | `pyfindrefs`   |\n"
+            "| Find dead / unreferenced code                 | manual      | `pyfindunused` |\n"
+        )
+    if has_ts:
+        rows += (
+            "| Rename a symbol (TS/JS)                       | `sed`/edit  | `tsrename`     |\n"
+            "| Move a file, rewrite imports (TS/JS)          | `mv`        | `tsmove`       |\n"
+            "| Change a function signature everywhere (TS)   | manual      | `tssignature`  |\n"
+            "| Find all references by name (TS/JS)           | grep        | `tsfindrefs`   |\n"
+        )
+    return (
+        "# AST Refactoring (bonsai)\n\n"
+        "Prefer bonsai over text tools for structural changes — AST-aware tools track imports, "
+        "re-exports, and aliased references that grep/sed/mv silently miss.\n\n"
+        "Bonsai tools accept **symbol names**, not positions — use them when you have a name "
+        "but not yet a line:character.\n\n"
+        "| Task                                          | Never use   | Use instead    |\n"
+        "|-----------------------------------------------|-------------|----------------|\n"
+        + rows
+        + "\n**Always `dry_run=true` first**, review the diff, then re-run without the flag to apply."
     )
 
 
@@ -374,6 +429,9 @@ def get_universal_system_prompt(  # noqa: PLR0912
         lsp_section = _get_lsp_section(config)
         if lsp_section:
             sections.append(lsp_section)
+        bonsai_section = _get_bonsai_section(config)
+        if bonsai_section:
+            sections.append(bonsai_section)
 
     if config.include_project_context:
         is_dangerous, reason = is_dangerous_directory()

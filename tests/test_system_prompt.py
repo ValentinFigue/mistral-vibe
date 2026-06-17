@@ -7,9 +7,10 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents import AgentManager
+from vibe.core.config._settings import MCPStdio
 from vibe.core.scratchpad import init_scratchpad
 from vibe.core.skills.manager import SkillManager
-from vibe.core.system_prompt import get_universal_system_prompt
+from vibe.core.system_prompt import _get_bonsai_section, get_universal_system_prompt
 from vibe.core.tools.manager import ToolManager
 
 
@@ -146,3 +147,47 @@ def test_current_date_placeholder_substituted_in_prompt() -> None:
     expected = f"Today's date is {today.isoformat()} ({today.strftime('%A')})."
     assert expected in prompt
     assert "$current_date" not in prompt
+
+
+def _make_mcp_stdio(name: str) -> MCPStdio:
+    return MCPStdio(name=name, transport="stdio", command="true")
+
+
+def test_bonsai_section_absent_when_no_bonsai_servers() -> None:
+    config = build_test_vibe_config(mcp_servers=[_make_mcp_stdio("some-other-tool")])
+    assert _get_bonsai_section(config) is None
+
+
+def test_bonsai_section_absent_when_no_mcp_servers() -> None:
+    config = build_test_vibe_config(mcp_servers=[])
+    assert _get_bonsai_section(config) is None
+
+
+def test_bonsai_section_py_only() -> None:
+    config = build_test_vibe_config(mcp_servers=[_make_mcp_stdio("bonsai-py")])
+    section = _get_bonsai_section(config)
+    assert section is not None
+    assert "pyrename" in section
+    assert "pymove" in section
+    assert "pyfindunused" in section
+    assert "tsrename" not in section
+
+
+def test_bonsai_section_ts_only() -> None:
+    config = build_test_vibe_config(mcp_servers=[_make_mcp_stdio("bonsai-ts")])
+    section = _get_bonsai_section(config)
+    assert section is not None
+    assert "tsrename" in section
+    assert "tsmove" in section
+    assert "pyrename" not in section
+
+
+def test_bonsai_section_both_py_and_ts() -> None:
+    config = build_test_vibe_config(
+        mcp_servers=[_make_mcp_stdio("bonsai-py"), _make_mcp_stdio("bonsai-ts")]
+    )
+    section = _get_bonsai_section(config)
+    assert section is not None
+    assert "pyrename" in section
+    assert "tsrename" in section
+    assert "dry_run=true" in section

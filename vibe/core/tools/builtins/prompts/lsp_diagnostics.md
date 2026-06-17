@@ -1,7 +1,7 @@
 Use `lsp_diagnostics` to get type errors, syntax errors, and warnings from the language server for a file.
 
-- Call after editing Python/TypeScript files to verify no new errors were introduced
-- Use before declaring a task complete when `lsp.mode` is `manual`
-- Errors (severity 1) block a clean build; warnings (severity 2) are advisory
+- In **auto/strict** mode: diagnostics are surfaced automatically after edits — your job is to react to errors shown and fix them before continuing, not to re-invoke this tool
+- In **manual** mode: call this after every edit to a `.py` or `.ts` file before moving on
+- Also call before declaring a task complete when there is any doubt
+- Errors (severity 1) indicate a broken build; warnings (severity 2) are advisory
 - Line numbers in results are 1-indexed
-- Only available when `lsp.servers` are configured and `lsp.mode != off`

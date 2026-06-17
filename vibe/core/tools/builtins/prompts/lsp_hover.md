@@ -1,6 +1,6 @@
-Use `lsp_hover` to get the type signature, documentation, or inferred type of the symbol at a position.
+Use `lsp_hover` to get the type signature, documentation, or inferred type of a symbol.
 
-- Useful before renaming to confirm what symbol you're targeting
-- Use when a type is unclear from reading the code alone
+- Use when reading unfamiliar code and a type or return value is unclear — not on symbols you already understand
+- Use before renaming to confirm which symbol is at the cursor position
 - `line` is 1-indexed; `character` is 0-indexed
-- Returns null contents if the server has no info for that position
+- Returns null if the server has no information for that position

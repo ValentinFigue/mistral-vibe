@@ -1,12 +1,14 @@
 Use `lsp_rename` to compute a rename refactoring across the whole workspace.
 
+- **Never use `edit`/`sed` directly to rename a symbol** — text edits miss re-exports, aliased imports, and dynamic references
+- When bonsai is available, prefer `pyrename`/`tsrename` — broader AST coverage
+
 **Workflow:**
-1. Use `lsp_references` first to confirm the blast radius
-2. Call `lsp_rename` — it returns a `workspace_edit` dict with all required changes
-3. Apply each change using the `edit` tool (the user sees and approves each file)
+1. `lsp_references` — confirm blast radius (or `pyfindrefs` if you only have a name)
+2. `lsp_rename` — returns a `workspace_edit` dict with all required changes
+3. Apply each file's edits with the `edit` tool (user sees and approves each)
 
 The tool does NOT auto-apply edits — it returns the edit plan for you to execute.
-This preserves the normal edit approval flow and keeps the rename auditable.
 
-- Returns null if the symbol cannot be renamed at that position (e.g., a keyword)
+- Returns null if the symbol is not renameable at that position (e.g., a keyword)
 - `line` is 1-indexed; `character` is 0-indexed

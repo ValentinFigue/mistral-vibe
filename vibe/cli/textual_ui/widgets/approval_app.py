@@ -87,6 +87,7 @@ class ApprovalApp(Container):
         self.tool_args = tool_args
         self.config = config
         self.required_permissions = required_permissions or []
+        self._cached_ladder: list[ScopeOption] = []
         self._scope_index: int = 0
         self.selected_option = 0
         self.content_container: Vertical | None = None
@@ -130,11 +131,12 @@ class ApprovalApp(Container):
     async def on_mount(self) -> None:
         self._mount_time = time.monotonic()
         await self._update_tool_info()
+        self._cached_ladder = self._get_ladder()
         rp_with_ladder = next((rp for rp in self.required_permissions if rp.scope_ladder), None)
         if rp_with_ladder:
             self._scope_index = rp_with_ladder.default_scope_index
         else:
-            self._scope_index = min(1, len(self._get_ladder()) - 1)
+            self._scope_index = min(1, len(self._cached_ladder) - 1)
         self._update_scope_widget()
         self._update_options()
         self.focus()
@@ -193,7 +195,7 @@ class ApprovalApp(Container):
         return [ScopeOption(label=f"Full tool: {self.tool_name}", pattern=None)]
 
     def _selected_rung(self) -> ScopeOption:
-        return self._get_ladder()[self._scope_index]
+        return self._cached_ladder[self._scope_index]
 
     def _get_active_permissions(self) -> list[RequiredPermission]:
         rung = self._selected_rung()
@@ -207,16 +209,13 @@ class ApprovalApp(Container):
     def _scope_hint_text(self) -> str:
         if not self.required_permissions:
             return ""
-        rung = self._selected_rung()
-        if rung.pattern is None:
-            return f"  Full tool: {self.tool_name}"
-        return f"  {rung.pattern}"
+        return f"  {self._selected_rung().label}"
 
     def _update_scope_widget(self) -> None:
         if not self.required_permissions:
             self._scope_widget.update("")
             return
-        ladder = self._get_ladder()
+        ladder = self._cached_ladder
         if len(ladder) <= 1:
             self._scope_widget.update("")
             return
@@ -226,7 +225,7 @@ class ApprovalApp(Container):
     def action_toggle_scope(self) -> None:
         if not self.required_permissions:
             return
-        self._scope_index = (self._scope_index + 1) % len(self._get_ladder())
+        self._scope_index = (self._scope_index + 1) % len(self._cached_ladder)
         self._update_scope_widget()
         self._update_options()
         self._recompute_height()

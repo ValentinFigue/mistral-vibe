@@ -346,7 +346,19 @@ def _register_bonsai_servers(config_doc: dict) -> None:  # type: ignore[type-arg
         print(f"✓ MCP server updated: {spec['name']}")
 
 
-def _write_skills() -> None:
+def _package_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("mistral-vibe")
+    except Exception:
+        return "unknown"
+
+
+def _skills_version_path() -> Path:
+    return _skills_dir() / ".aether_version"
+
+
+def _write_skills(verbose: bool = True) -> None:
     import importlib.resources as pkg_resources
 
     skills_root = _skills_dir()
@@ -361,6 +373,24 @@ def _write_skills() -> None:
             dest = skills_root / skill_dir.name / "SKILL.md"
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
-            print(f"✓ Skill installed: ~/.vibe/skills/{skill_dir.name}/")
+            if verbose:
+                print(f"✓ Skill installed: ~/.vibe/skills/{skill_dir.name}/")
     except Exception:
         pass
+
+    version_path = _skills_version_path()
+    version_path.parent.mkdir(parents=True, exist_ok=True)
+    version_path.write_text(_package_version(), encoding="utf-8")
+
+
+def maybe_refresh_skills() -> None:
+    """Silently re-write skills if the installed package version has changed."""
+    version_path = _skills_version_path()
+    if not version_path.exists():
+        return
+    try:
+        installed = version_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return
+    if installed != _package_version():
+        _write_skills(verbose=False)

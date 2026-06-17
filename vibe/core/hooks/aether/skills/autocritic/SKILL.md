@@ -33,6 +33,12 @@ Then write the full critique output to `.claude/plans/CRITIQUE.md`, prepending a
 
 If the file already exists, append (do not overwrite) so history accumulates.
 
+After appending the critique, compute the SHA256 hash of the plan file you critiqued (use `sha256sum <path>` or Python's `hashlib`) and append this exact line as the very last line of CRITIQUE.md (replacing any previous hash footer if one already exists):
+
+`<!-- aether:plan-hash:sha256:<hex-hash> -->`
+
+This allows the whetstone gate to detect whether the plan was changed after the critique was written.
+
 After writing, confirm: "Critique written to .claude/plans/CRITIQUE.md — whetstone gate cleared."
 
 If blockers (🔴) were found, end with: "X blocker(s) found. Resolve these before committing, or append # whetstone:skip to bypass."

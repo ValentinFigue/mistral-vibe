@@ -56,21 +56,29 @@ class ResolvedMessage(BaseModel):
 
 
 class APIToolFormatHandler:
+    def __init__(self) -> None:
+        self._tool_list_key: frozenset[str] = frozenset()
+        self._tool_list_cache: list[AvailableTool] = []
+
     @property
     def name(self) -> str:
         return "api"
 
     def get_available_tools(self, tool_manager: ToolManager) -> list[AvailableTool]:
-        return [
-            AvailableTool(
-                function=AvailableFunction(
-                    name=tool_class.get_name(),
-                    description=tool_class.description,
-                    parameters=tool_class.get_parameters(),
+        key = frozenset(tool_manager.available_tools.keys())
+        if key != self._tool_list_key:
+            self._tool_list_key = key
+            self._tool_list_cache = [
+                AvailableTool(
+                    function=AvailableFunction(
+                        name=tool_class.get_name(),
+                        description=tool_class.description,
+                        parameters=tool_class.get_parameters(),
+                    )
                 )
-            )
-            for tool_class in tool_manager.available_tools.values()
-        ]
+                for tool_class in tool_manager.available_tools.values()
+            ]
+        return self._tool_list_cache
 
     def get_tool_choice(self) -> StrToolChoice | AvailableTool:
         return "auto"

@@ -615,6 +615,14 @@ class VibeConfig(BaseSettings):
     enable_system_trust_store: bool = False
     api_timeout: float = DEFAULT_API_TIMEOUT
     auto_compact_threshold: int = DEFAULT_AUTO_COMPACT_THRESHOLD
+    tool_result_max_tokens: int = Field(
+        default=4000,
+        description=(
+            "Maximum tokens to store per tool result in conversation history. "
+            "Results exceeding this limit are middle-truncated before being appended, "
+            "keeping the head and tail. Set to 0 to disable truncation."
+        ),
+    )
 
     vibe_code_enabled: bool = Field(default=True, exclude=True)
     vibe_code_base_url: str = Field(default=DEFAULT_MISTRAL_SERVER_URL, exclude=True)

@@ -36,6 +36,7 @@ import tomli_w
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
+from vibe.core.lsp._config import LSPConfig
 from vibe.core.paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.prompts import (
     SystemPrompt,
@@ -673,6 +674,15 @@ class VibeConfig(BaseSettings):
 
     mcp_servers: list[MCPServer] = Field(
         default_factory=list, description="Preferred MCP server configuration entries."
+    )
+
+    lsp: LSPConfig = Field(
+        default_factory=LSPConfig,
+        description=(
+            "Language Server Protocol integration settings. "
+            "Configure mode (off/manual/auto/strict), servers (pyright, typescript-language-server), "
+            "and diagnostic display options."
+        ),
     )
     enable_connectors: bool = Field(
         default=True,

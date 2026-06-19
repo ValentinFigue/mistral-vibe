@@ -99,6 +99,10 @@ from vibe.core.tools.permissions import (
     PermissionStore,
     RequiredPermission,
 )
+from vibe.core.lsp import LSPManager, LSPMode, get_lsp_manager, set_lsp_manager
+from vibe.core.lsp._diagnostics import compute_delta, format_code_frame, format_diagnostic_line
+from vibe.core.tools.builtins.edit import EditResult
+from vibe.core.tools.builtins.write_file import WriteFileResult
 from vibe.core.tracing import agent_span, set_tool_result, tool_span
 from vibe.core.trusted_folders import has_agents_md_file
 from vibe.core.types import (
@@ -115,6 +119,7 @@ from vibe.core.types import (
     LLMChunk,
     LLMMessage,
     LLMUsage,
+    LspDeltaEvent,
     MessageList,
     PlanReviewEndedEvent,
     PlanReviewRequestedEvent,
@@ -281,6 +286,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._experiments_task: asyncio.Task[None] | None = None
         self._pending_new_session_telemetry: bool = False
         self._ready_telemetry_pending: bool = defer_heavy_init
+        self._pending_lsp_start: bool = False
 
         self._permission_store = permission_store or PermissionStore()
 
@@ -425,6 +431,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         """
         try:
             self.tool_manager.integrate_all(raise_on_mcp_failure=True)
+
+            lsp_cfg = self._base_config.lsp
+            if lsp_cfg.is_active():
+                # Only create the manager here; actual async startup runs in
+                # wait_until_ready() so the reader tasks live in the right loop.
+                lsp = LSPManager()
+                set_lsp_manager(lsp)
+                self._pending_lsp_start = True
+
             system_prompt = get_universal_system_prompt(
                 self.tool_manager,
                 self.config,
@@ -457,6 +472,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if self._pending_new_session_telemetry:
             self._pending_new_session_telemetry = False
             self.emit_new_session_telemetry()
+        if self._pending_lsp_start:
+            self._pending_lsp_start = False
+            if (lsp := get_lsp_manager()) is not None:
+                await lsp.start_all(self._base_config.lsp, Path.cwd())
 
     @property
     def agent_profile(self) -> AgentProfile:
@@ -604,6 +623,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             await self.backend.__aexit__(None, None, None)
         with contextlib.suppress(Exception):
             await self.experiment_manager.aclose()
+        if (lsp := get_lsp_manager()) is not None:
+            with contextlib.suppress(Exception):
+                await lsp.stop_all()
+            set_lsp_manager(None)
 
     def _create_connector_registry(self) -> ConnectorRegistry | None:
         if not self._base_config.enable_connectors:
@@ -1368,6 +1391,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         result_cancelled = (
             isinstance(result_model, CancellableToolResult) and result_model.cancelled
         )
+
+        # Auto-diagnostics: run LSP after Edit/WriteFile when mode is auto or strict
+        lsp_event: LspDeltaEvent | None = None
+        if not result_cancelled:
+            lsp_event = await self._maybe_run_lsp_post_edit(result_model)
+            if lsp_event is not None:
+                text = text + "\n\n" + lsp_event.agent_context if lsp_event.agent_context else text
+
         yield ToolResultEvent(
             tool_name=tool_call.tool_name,
             tool_class=tool_call.tool_class,
@@ -1376,6 +1407,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             duration=duration,
             tool_call_id=tool_call.call_id,
         )
+        if lsp_event is not None:
+            yield lsp_event
         async for ev in self._run_after_tool_and_finalize(
             tool_call,
             tool_input=tool_input,
@@ -1389,6 +1422,90 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         ):
             yield ev
         self.stats.tool_calls_succeeded += 1
+
+    async def _maybe_run_lsp_post_edit(
+        self, result_model: BaseModel
+    ) -> LspDeltaEvent | None:
+        """Run LSP diagnostics after an edit if mode is auto or strict."""
+        if isinstance(result_model, EditResult):
+            file_path = result_model.file
+        elif isinstance(result_model, WriteFileResult):
+            file_path = result_model.path
+        else:
+            return None
+
+        lsp = get_lsp_manager()
+        if lsp is None:
+            return None
+
+        mode = lsp.effective_mode_for_file(file_path)
+        if mode not in (LSPMode.AUTO, LSPMode.STRICT):
+            return None
+
+        lsp_cfg = self._base_config.lsp
+        try:
+            before = lsp.get_last_diagnostics(file_path)
+            await lsp.open_or_sync_file(file_path)
+            after = await lsp.fetch_diagnostics(file_path)
+            lsp.update_last_diagnostics(file_path, after)
+        except Exception:
+            return None
+
+        delta = compute_delta(before, after, lsp_cfg.min_severity)
+
+        display_lines: list[str] = []
+        agent_lines: list[str] = []
+        shown = 0
+        all_diags = delta.new_errors + delta.new_warnings
+        limit = lsp_cfg.max_diagnostics_shown
+
+        for diag in all_diags:
+            if shown >= limit:
+                remaining = len(all_diags) - shown
+                display_lines.append(f"  +{remaining} more (use /diag to see all)")
+                break
+            display_lines.append(format_diagnostic_line(diag))
+            agent_lines.append(format_diagnostic_line(diag))
+
+            if diag.get("severity", 2) == 1:
+                r = diag.get("range", {})
+                line_num = r.get("start", {}).get("line", 0) + 1
+                try:
+                    source = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                    lines = source.splitlines()
+                    if 0 < line_num <= len(lines):
+                        frame = format_code_frame(lines[line_num - 1], diag, line_num)
+                        display_lines.append(frame)
+                except Exception:
+                    pass
+            shown += 1
+
+        if delta.fixed_errors or delta.fixed_warnings:
+            fixed_count = len(delta.fixed_errors) + len(delta.fixed_warnings)
+            display_lines.append(f"  (fixed {fixed_count} previous issue{'s' if fixed_count != 1 else ''})")
+
+        display_text = f"✱ edited  {file_path}\n" + "\n".join(display_lines)
+        if delta.has_changes:
+            display_text += f"\n  → {delta.summary}"
+
+        if mode == LSPMode.STRICT and delta.new_errors:
+            agent_ctx = (
+                f"[LSP] After editing {Path(file_path).name}: {delta.summary}. "
+                f"New errors must be fixed before finishing:\n" + "\n".join(agent_lines)
+            )
+        elif mode == LSPMode.AUTO and delta.has_changes and lsp_cfg.verbose:
+            agent_ctx = f"[LSP] {Path(file_path).name}: {delta.summary}"
+        else:
+            agent_ctx = ""
+            if mode == LSPMode.STRICT and not delta.new_errors and delta.has_changes:
+                agent_ctx = f"[LSP] {Path(file_path).name}: {delta.summary} — no new errors."
+
+        return LspDeltaEvent(
+            file_path=file_path,
+            display_text=display_text,
+            agent_context=agent_ctx,
+            has_new_errors=bool(delta.new_errors),
+        )
 
     async def _should_execute_tool(
         self, tool: BaseTool, args: BaseModel, tool_call_id: str

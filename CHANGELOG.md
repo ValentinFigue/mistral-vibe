@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **LSP integration** (`lsp` config section): connect Pyright and `typescript-language-server` (or any LSP server) via JSON-RPC over stdio. Adds six agent-facing tools (`lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_rename`, `lsp_document_symbols`) and six human-facing slash commands (`/lsp`, `/diag`, `/refs`, `/def`, `/sym`, `/explain`). Four modes: `off`, `manual`, `auto` (auto-diagnostics delta after edits), `strict` (new errors block agent until fixed). System prompt is extended automatically when LSP servers are active.
+
 - **Aether discipline suite** (`vibe --enable-aether`): four `BEFORE_TOOL` hooks that fire on every bash call — whetstone (blocks commits when a plan is uncritiqued), bonsai (nudges toward AST tools instead of `grep`/`sed`/`mv` on `.py`/`.ts` files), temper (blocks large or critical-path diffs without a review pass), cairn (nudges toward meaningful commit messages)
 - **Bonsai MCP servers** registered automatically on `--enable-aether`: `bonsai-py` (`uvx bonsai-python`) and `bonsai-ts` (`npx --yes bonsai-ts@latest`) provide AST-aware Python and TypeScript refactoring tools (`pyrename`, `pymove`, `pyfindrefs`, `tsrename`, `tsmove`, etc.)
 - **Bonsai tool guidance** written to `~/.vibe/AGENTS.md` on enable so the model proactively reaches for AST tools in conversation, not just when a gate fires

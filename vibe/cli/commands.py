@@ -189,6 +189,41 @@ class CommandRegistry:
                 description="Switch to accept-edits mode (file edits auto-approved, other tools ask)",
                 handler="_switch_to_accept_edits_mode",
             ),
+            "lsp": Command(
+                aliases=frozenset(["/lsp"]),
+                description=(
+                    "Manage LSP servers. Subcommands: "
+                    "`/lsp` (status), `/lsp mode <off|manual|auto|strict>`, "
+                    "`/lsp on`, `/lsp off`, `/lsp restart [server]`, "
+                    "`/lsp servers`, `/lsp doctor`"
+                ),
+                handler="_lsp_command",
+            ),
+            "diag": Command(
+                aliases=frozenset(["/diag"]),
+                description="Show LSP diagnostics for a file: `/diag [file]`",
+                handler="_lsp_diag_command",
+            ),
+            "refs": Command(
+                aliases=frozenset(["/refs"]),
+                description="Find all references at a position: `/refs file.py:line:col`",
+                handler="_lsp_refs_command",
+            ),
+            "def": Command(
+                aliases=frozenset(["/def"]),
+                description="Go to definition at a position: `/def file.py:line:col`",
+                handler="_lsp_def_command",
+            ),
+            "sym": Command(
+                aliases=frozenset(["/sym"]),
+                description="List symbols in a file: `/sym file.py`",
+                handler="_lsp_sym_command",
+            ),
+            "explain": Command(
+                aliases=frozenset(["/explain"]),
+                description="Explain a diagnostic code: `/explain reportUndefinedVariable`",
+                handler="_lsp_explain_command",
+            ),
         }
 
     @property

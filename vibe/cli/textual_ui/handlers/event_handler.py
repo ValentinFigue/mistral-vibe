@@ -33,6 +33,7 @@ from vibe.core.types import (
     BaseEvent,
     CompactEndEvent,
     CompactStartEvent,
+    LspDeltaEvent,
     PlanReviewEndedEvent,
     PlanReviewRequestedEvent,
     ReasoningEvent,
@@ -178,6 +179,9 @@ class EventHandler:
                 self._handle_stop_plan_review()
             case WaitingForInputEvent():
                 await self.finalize_streaming()
+            case LspDeltaEvent():
+                await self.finalize_streaming()
+                await self._handle_lsp_delta(event)
             case _:
                 await self.finalize_streaming()
                 await self._handle_unknown_event(event)
@@ -282,6 +286,12 @@ class EventHandler:
                 old_session_id=event.old_session_id, new_session_id=event.new_session_id
             )
             self.current_compact = None
+
+    async def _handle_lsp_delta(self, event: LspDeltaEvent) -> None:
+        from vibe.cli.textual_ui.widgets.messages import UserCommandMessage
+
+        if event.display_text:
+            await self.mount_callback(UserCommandMessage(event.display_text))
 
     async def _handle_unknown_event(self, event: BaseEvent) -> None:
         await self.mount_callback(NoMarkupStatic(str(event), classes="unknown-event"))

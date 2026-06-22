@@ -311,6 +311,7 @@ class MistralBackend:
                 metadata=metadata,
                 stream=False,
                 reasoning_effort=reasoning_effort,
+                prompt_cache_key=metadata.get("session_id") if metadata else None,
             )
 
             message = response.choices[0].message
@@ -388,6 +389,7 @@ class MistralBackend:
                 http_headers=extra_headers,
                 metadata=metadata,
                 reasoning_effort=reasoning_effort,
+                prompt_cache_key=metadata.get("session_id") if metadata else None,
             )
             correlation_id = stream.response.headers.get("mistral-correlation-id")
             async for chunk in stream:

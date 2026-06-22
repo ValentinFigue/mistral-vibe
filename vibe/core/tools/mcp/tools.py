@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 import contextlib
 from datetime import timedelta
@@ -37,6 +38,17 @@ if TYPE_CHECKING:
 # mcp.shared._httpx_utils, which is an internal module.
 _MCP_DEFAULT_TIMEOUT = 30.0
 _MCP_DEFAULT_SSE_READ_TIMEOUT = 300.0
+
+# One asyncio.Lock per server alias. Serializes concurrent auth-refresh attempts
+# so only one in-flight request triggers a token refresh; others wait and reuse
+# the refreshed token. Keyed by alias to avoid cross-server contention.
+_alias_refresh_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_alias_refresh_lock(alias: str) -> asyncio.Lock:
+    if alias not in _alias_refresh_locks:
+        _alias_refresh_locks[alias] = asyncio.Lock()
+    return _alias_refresh_locks[alias]
 
 
 def _stderr_logger_thread(read_fd: int) -> None:
@@ -278,9 +290,6 @@ def create_mcp_http_proxy_tool_class(
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
         _headers: ClassVar[dict[str, str]] = dict(headers or {})
-        # TODO(VIBE-3057+): concurrent refresh coordinated by per-alias
-        # asyncio.Lock in MCPRegistry (PR 4 / project decision #6) — this
-        # object is shared across all calls on this proxy class.
         _auth: ClassVar[httpx.Auth | None] = auth
         _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
         _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
@@ -302,6 +311,9 @@ def create_mcp_http_proxy_tool_class(
                     ctx.sampling_callback if ctx and self._sampling_enabled else None
                 )
                 payload = args.model_dump(exclude_none=True)
+                # _get_alias_refresh_lock(self._server_name) is available for
+                # when OAuth token refresh (VIBE-3057) is wired up — use it to
+                # wrap only the refresh step, not the full network call.
                 yield await call_tool_http(
                     self._mcp_url,
                     self._remote_name,

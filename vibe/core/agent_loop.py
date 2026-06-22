@@ -7,7 +7,9 @@ import copy
 from enum import StrEnum, auto
 from functools import wraps
 from http import HTTPStatus
+import hashlib
 import inspect
+import json
 import os
 from pathlib import Path
 import threading
@@ -145,6 +147,7 @@ from vibe.core.utils import (
     get_user_cancellation_message,
     is_user_cancellation_event,
 )
+from vibe.core.utils.tokens import truncate_middle_to_tokens
 
 try:
     from vibe.core.teleport.teleport import TeleportService as _TeleportService
@@ -350,6 +353,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.approval_callback: ApprovalCallback | None = None
         self.user_input_callback: UserInputCallback | None = None
         self.entrypoint_metadata = entrypoint_metadata
+        # Maps cache_key → content_hash for deduplication of repeated reads.
+        self._tool_result_hashes: dict[str, str] = {}
+        # Reverse index: file_path → set of cache_keys that reference it.
+        # Used to invalidate all cached reads (full or partial) for a path.
+        self._tool_result_paths: dict[str, set[str]] = {}
 
         try:
             active_model = config.get_active_model()
@@ -1046,12 +1054,39 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         return None
 
+    def _thinking_override_for_dispatch(self) -> ModelConfig | None:
+        """Return a model copy with thinking disabled when the last assistant
+        turn was a pure tool dispatch (tool calls, no prose).
+
+        Reasoning over the result of already-committed tool calls is wasteful —
+        the model is just processing structured output, not making a new plan.
+        """
+        for msg in reversed(list(self.messages)):
+            if msg.role == Role.assistant:
+                is_dispatch_only = bool(msg.tool_calls) and not (
+                    msg.content or ""
+                ).strip()
+                if not is_dispatch_only:
+                    return None
+                active_model = self.config.get_active_model()
+                if active_model.thinking in ("off", ""):
+                    return None
+                return active_model.model_copy(update={"thinking": "off"})
+            if msg.role == Role.user:
+                break
+        return None
+
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
+        model_override = self._thinking_override_for_dispatch()
         if self.enable_streaming:
-            async for event in self._stream_assistant_events():
+            async for event in self._stream_assistant_events(
+                model_override=model_override
+            ):
                 yield event
         else:
-            assistant_event = await self._get_assistant_event()
+            assistant_event = await self._get_assistant_event(
+                model_override=model_override
+            )
             if assistant_event.content:
                 yield assistant_event
 
@@ -1095,12 +1130,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _stream_assistant_events(
         self,
+        model_override: ModelConfig | None = None,
     ) -> AsyncGenerator[AssistantEvent | ReasoningEvent | ToolCallEvent]:
         message_id: str | None = None
         reasoning_message_id: str | None = None
         emitted_tool_call_ids = set[str]()
 
-        async for chunk in self._chat_streaming():
+        async for chunk in self._chat_streaming(model_override=model_override):
             if message_id is None:
                 message_id = chunk.message.message_id
             if reasoning_message_id is None:
@@ -1123,8 +1159,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     content=chunk.message.content, message_id=message_id
                 )
 
-    async def _get_assistant_event(self) -> AssistantEvent:
-        llm_result = await self._chat()
+    async def _get_assistant_event(
+        self, model_override: ModelConfig | None = None
+    ) -> AssistantEvent:
+        llm_result = await self._chat(model_override=model_override)
         return AssistantEvent(
             content=llm_result.message.content or "",
             message_id=llm_result.message.message_id,
@@ -1579,6 +1617,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             verdict=verdict, approval_type=ToolPermission.ASK, feedback=feedback
         )
 
+    _DEDUP_TOOLS = frozenset({"read"})
+    _INVALIDATE_TOOLS = frozenset({"edit", "write_file"})
+
+    def _tool_call_cache_key(self, tool_call: ResolvedToolCall) -> str:
+        args_blob = json.dumps(tool_call.args_dict, sort_keys=True, default=str)
+        return hashlib.md5(
+            f"{tool_call.tool_name}\x00{args_blob}".encode()
+        ).hexdigest()
+
     def _handle_tool_response(
         self,
         tool_call: ResolvedToolCall,
@@ -1588,6 +1635,35 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         result: dict[str, Any] | None = None,
         span: trace.Span | None = None,
     ) -> None:
+        # Invalidate all cached reads for a path when it is written/edited.
+        # Uses the reverse index so partial reads (with offset/limit) are also
+        # cleared, not just exact full-file reads.
+        if tool_call.tool_name in self._INVALIDATE_TOOLS:
+            path = tool_call.args_dict.get("file_path") or tool_call.args_dict.get(
+                "path", ""
+            )
+            if path:
+                for stale_key in self._tool_result_paths.pop(path, set()):
+                    self._tool_result_hashes.pop(stale_key, None)
+
+        # Replace identical repeated read results with a lightweight stub.
+        if status == "success" and tool_call.tool_name in self._DEDUP_TOOLS:
+            cache_key = self._tool_call_cache_key(tool_call)
+            content_hash = hashlib.md5(text.encode()).hexdigest()
+            if self._tool_result_hashes.get(cache_key) == content_hash:
+                text = "[same as previous read — file content unchanged]"
+            else:
+                self._tool_result_hashes[cache_key] = content_hash
+                # Register the reverse-index entry so writes can invalidate this.
+                file_path = tool_call.args_dict.get("file_path", "")
+                if file_path:
+                    self._tool_result_paths.setdefault(file_path, set()).add(
+                        cache_key
+                    )
+
+        max_tokens = self.config.tool_result_max_tokens
+        if max_tokens > 0:
+            text = truncate_middle_to_tokens(text, max_tokens)
         self.messages.append(
             LLMMessage.model_validate(
                 self.format_handler.create_tool_response_message(tool_call, text)
@@ -1716,9 +1792,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             ) from e
 
     async def _chat_streaming(
-        self, max_tokens: int | None = None
+        self, max_tokens: int | None = None, model_override: ModelConfig | None = None
     ) -> AsyncGenerator[LLMChunk]:
-        active_model = self.config.get_active_model()
+        active_model = model_override or self.config.get_active_model()
         provider = self.config.get_active_provider()
         backend_metadata = self._build_backend_metadata()
 
@@ -2012,6 +2088,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             )
 
             self.middleware_pipeline.reset(reset_reason=ResetReason.COMPACT)
+            # Previous tool results are no longer in context after compaction;
+            # serving dedup stubs referencing them would confuse the model.
+            self._tool_result_hashes.clear()
+            self._tool_result_paths.clear()
 
             return summary_content
 

@@ -333,6 +333,7 @@ class BaseTool[
         raise TypeError(f"Could not extract result type from {return_annotation!r}")
 
     @classmethod
+    @functools.cache
     def get_parameters(cls) -> dict[str, Any]:
         """Return a cleaned-up JSON-schema dict describing the arguments model
         with which this concrete tool was parametrised.

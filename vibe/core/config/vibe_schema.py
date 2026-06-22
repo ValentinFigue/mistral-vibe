@@ -60,6 +60,7 @@ class VibeConfigSchema(ConfigSchema):
     auto_compact_threshold: Annotated[int, WithReplaceMerge()] = (
         DEFAULT_AUTO_COMPACT_THRESHOLD
     )
+    tool_result_max_tokens: Annotated[int, WithReplaceMerge()] = 4000
     active_transcribe_model: Annotated[str, WithReplaceMerge()] = (
         DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG.alias
     )

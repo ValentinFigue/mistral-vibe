@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';" />
+  <title>Vibe</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-editor-background);
+    }
+
+    #status {
+      padding: 6px 12px;
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      border-bottom: 1px solid var(--vscode-panel-border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #reconnect-btn {
+      display: none;
+      padding: 2px 8px;
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+
+    #reconnect-btn:hover { opacity: 0.85; }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .message {
+      max-width: 92%;
+      padding: 8px 12px;
+      border-radius: 6px;
+      word-break: break-word;
+      line-height: 1.6;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      white-space: pre-wrap;
+    }
+
+    .message.assistant {
+      align-self: flex-start;
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-panel-border);
+    }
+
+    /* Markdown rendering inside assistant bubbles */
+    .message.assistant h1,
+    .message.assistant h2,
+    .message.assistant h3 {
+      margin: 10px 0 4px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+    .message.assistant h1 { font-size: 1.2em; }
+    .message.assistant h2 { font-size: 1.1em; }
+    .message.assistant h3 { font-size: 1em; }
+
+    .message.assistant p { margin: 6px 0; }
+    .message.assistant p:first-child { margin-top: 0; }
+    .message.assistant p:last-child { margin-bottom: 0; }
+
+    .message.assistant ul,
+    .message.assistant ol {
+      margin: 6px 0;
+      padding-left: 20px;
+    }
+    .message.assistant li { margin: 2px 0; }
+
+    .message.assistant code {
+      font-family: var(--vscode-editor-font-family);
+      font-size: 0.9em;
+      background: var(--vscode-textCodeBlock-background);
+      border-radius: 3px;
+      padding: 1px 4px;
+    }
+
+    .message.assistant pre {
+      margin: 8px 0;
+      padding: 10px 12px;
+      background: var(--vscode-textCodeBlock-background);
+      border-radius: 4px;
+      overflow-x: auto;
+      border: 1px solid var(--vscode-panel-border);
+    }
+
+    .message.assistant pre code {
+      background: none;
+      padding: 0;
+      font-size: var(--vscode-editor-font-size, 13px);
+      white-space: pre;
+    }
+
+    .message.assistant strong { font-weight: 600; }
+    .message.assistant em { font-style: italic; }
+
+    .message.assistant a {
+      color: var(--vscode-textLink-foreground);
+      text-decoration: none;
+    }
+    .message.assistant a:hover { text-decoration: underline; }
+
+    .message.assistant hr {
+      border: none;
+      border-top: 1px solid var(--vscode-panel-border);
+      margin: 8px 0;
+    }
+
+    /* Tool call cards */
+    .tool-call-card {
+      align-self: flex-start;
+      width: 100%;
+      max-width: 100%;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 12px;
+    }
+
+    .tool-call-card summary {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      cursor: pointer;
+      padding: 5px 10px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      list-style: none;
+      background: var(--vscode-sideBar-background);
+      user-select: none;
+      min-width: 0;
+    }
+    .tool-call-card summary::-webkit-details-marker { display: none; }
+
+    .tool-call-card[open] > summary {
+      border-radius: 4px 4px 0 0;
+      border-bottom-color: transparent;
+    }
+
+    .tc-arrow {
+      font-size: 9px;
+      color: var(--vscode-descriptionForeground);
+      flex-shrink: 0;
+      transition: transform 0.15s;
+    }
+    .tool-call-card[open] .tc-arrow { transform: rotate(90deg); }
+
+    .tc-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .tc-dot.running  { background: #4ec9b0; }
+    .tc-dot.done     { background: var(--vscode-descriptionForeground); opacity: 0.6; }
+    .tc-dot.failed   { background: #f44747; }
+
+    .tc-name {
+      font-weight: 700;
+      color: var(--vscode-editor-foreground);
+      flex-shrink: 0;
+    }
+
+    .tc-title {
+      color: var(--vscode-descriptionForeground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .tc-body {
+      border: 1px solid var(--vscode-panel-border);
+      border-top: none;
+      border-radius: 0 0 4px 4px;
+      overflow: hidden;
+    }
+
+    .tc-row {
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      align-items: start;
+      gap: 6px;
+      padding: 5px 8px;
+    }
+    .tc-row + .tc-row {
+      border-top: 1px solid var(--vscode-panel-border);
+    }
+
+    .tc-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--vscode-descriptionForeground);
+      padding-top: 2px;
+    }
+
+    .tc-content {
+      font-family: var(--vscode-editor-font-family);
+      font-size: 12px;
+      white-space: pre;
+      overflow-x: auto;
+      margin: 0;
+      color: var(--vscode-editor-foreground);
+      max-height: 140px;
+      overflow-y: auto;
+      line-height: 1.5;
+    }
+
+    #input-area {
+      display: flex;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-sideBar-background);
+    }
+
+    #input {
+      flex: 1;
+      padding: 6px 10px;
+      border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      resize: none;
+      min-height: 36px;
+      max-height: 120px;
+    }
+
+    #input:focus { outline: 1px solid var(--vscode-focusBorder); }
+
+    #send {
+      padding: 6px 14px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: var(--vscode-font-size);
+      align-self: flex-end;
+    }
+
+    #send:hover { background: var(--vscode-button-hoverBackground); }
+    #send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    #stop-btn {
+      display: none;
+      padding: 6px 14px;
+      background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
+      color: var(--vscode-button-foreground);
+      border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: var(--vscode-font-size);
+      align-self: flex-end;
+    }
+    #stop-btn:hover { opacity: 0.85; }
+  </style>
+</head>
+<body>
+  <div id="status">
+    <span id="status-text">Initializing…</span>
+    <button id="reconnect-btn">Reconnect</button>
+  </div>
+  <div id="messages"></div>
+  <div id="input-area">
+    <textarea id="input" placeholder="Ask vibe anything…" rows="1"></textarea>
+    <button id="stop-btn">Stop</button>
+    <button id="send">Send</button>
+  </div>
+
+  <script nonce="{{nonce}}">
+    const vscode = acquireVsCodeApi();
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+    const stopBtn = document.getElementById('stop-btn');
+    const statusTextEl = document.getElementById('status-text');
+    const reconnectBtn = document.getElementById('reconnect-btn');
+
+    let currentAssistantEl = null;
+    let currentRawText = '';
+    let busy = false;
+    const toolCallMap = new Map(); // toolCallId → {details, dot}
+
+    // --- Minimal markdown renderer ---
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function renderMarkdown(raw) {
+      // 1. Extract fenced code blocks before escaping so their content is preserved
+      const blocks = [];
+      let text = raw.replace(/```([^\n]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+        const i = blocks.length;
+        const langClass = lang.trim() ? ` class="language-${escapeHtml(lang.trim())}"` : '';
+        blocks.push(`<pre><code${langClass}>${escapeHtml(code.trimEnd())}</code></pre>`);
+        return `\x00BLOCK${i}\x00`;
+      });
+
+      // 2. Escape remaining HTML
+      text = escapeHtml(text);
+
+      // 3. Inline code
+      text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+      // 4. Bold + italic (order: *** before ** before *)
+      text = text.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+      text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+      // 5. Headers
+      text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+      // 6. Horizontal rules
+      text = text.replace(/^[-*_]{3,}$/gm, '<hr>');
+
+      // 7. Ordered lists
+      text = text.replace(/^(\d+)\. (.+)$/gm, '<li>$2</li>');
+
+      // 8. Unordered lists
+      text = text.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
+
+      // Wrap consecutive <li> runs in <ul> (simple heuristic)
+      text = text.replace(/(<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
+
+      // 9. Paragraphs: split on blank lines
+      const parts = text.split(/\n{2,}/);
+      text = parts.map(p => {
+        p = p.trim();
+        if (!p) return '';
+        // Don't wrap block elements in <p>
+        if (/^<(h[1-6]|ul|ol|li|pre|hr|blockquote)/.test(p)) return p;
+        return `<p>${p.replace(/\n/g, '<br>')}</p>`;
+      }).join('\n');
+
+      // 10. Restore code blocks
+      text = text.replace(/\x00BLOCK(\d+)\x00/g, (_, i) => blocks[parseInt(i, 10)]);
+
+      return text;
+    }
+    // --- End markdown renderer ---
+
+    function scrollBottom() {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function addMessage(cls, htmlContent) {
+      const el = document.createElement('div');
+      el.className = `message ${cls}`;
+      if (cls === 'user') {
+        el.textContent = htmlContent; // user input: plain text, no XSS risk but use textContent
+      } else {
+        el.innerHTML = htmlContent;
+      }
+      messagesEl.appendChild(el);
+      scrollBottom();
+      return el;
+    }
+
+    function setBusy(val) {
+      busy = val;
+      sendBtn.disabled = val;
+      stopBtn.style.display = val ? 'inline-block' : 'none';
+    }
+
+    function send() {
+      const text = inputEl.value.trim();
+      if (!text || busy) return;
+      setBusy(true);
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+      vscode.postMessage({ type: 'prompt', text });
+    }
+
+    sendBtn.addEventListener('click', send);
+    stopBtn.addEventListener('click', () => {
+      setBusy(false);
+      statusTextEl.textContent = 'Stopping…';
+      vscode.postMessage({ type: 'stop' });
+    });
+    reconnectBtn.addEventListener('click', () => {
+      reconnectBtn.style.display = 'none';
+      statusTextEl.textContent = 'Reconnecting…';
+      vscode.postMessage({ type: 'reconnect' });
+    });
+
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    inputEl.addEventListener('input', () => {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    });
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      switch (msg.type) {
+        case 'status':
+          statusTextEl.textContent = msg.text;
+          reconnectBtn.style.display = 'none';
+          break;
+        case 'disconnected':
+          statusTextEl.textContent = msg.text ?? 'Connection lost.';
+          reconnectBtn.style.display = 'inline-block';
+          setBusy(false);
+          break;
+        case 'userMessage':
+          addMessage('user', msg.text);
+          break;
+        case 'assistantStart':
+          currentRawText = '';
+          currentAssistantEl = addMessage('assistant', '');
+          break;
+        case 'assistantChunk':
+          if (currentAssistantEl) {
+            currentRawText += msg.text;
+            currentAssistantEl.innerHTML = renderMarkdown(currentRawText);
+            scrollBottom();
+          }
+          break;
+        case 'assistantEnd':
+          currentAssistantEl = null;
+          currentRawText = '';
+          setBusy(false);
+          inputEl.focus();
+          break;
+        case 'toolCallStart': {
+          const name = msg.title ? String(msg.title).charAt(0).toUpperCase() + String(msg.title).slice(1) : 'Tool';
+          const inputText = msg.rawInput
+            ? (typeof msg.rawInput === 'string' ? msg.rawInput : JSON.stringify(msg.rawInput, null, 2))
+            : '';
+
+          const details = document.createElement('details');
+          details.className = 'tool-call-card';
+
+          const summary = document.createElement('summary');
+          summary.innerHTML =
+            `<span class="tc-arrow">▶</span>` +
+            `<span class="tc-dot running"></span>` +
+            `<span class="tc-name">${escapeHtml(name)}</span>` +
+            (inputText ? `<span class="tc-title">${escapeHtml(inputText.split('\n')[0].slice(0, 80))}</span>` : '');
+
+          const body = document.createElement('div');
+          body.className = 'tc-body';
+
+          if (inputText) {
+            const row = document.createElement('div');
+            row.className = 'tc-row';
+            row.innerHTML = `<span class="tc-label">IN</span><pre class="tc-content">${escapeHtml(inputText)}</pre>`;
+            body.appendChild(row);
+          }
+
+          details.appendChild(summary);
+          details.appendChild(body);
+          messagesEl.appendChild(details);
+          scrollBottom();
+
+          if (msg.toolCallId) {
+            toolCallMap.set(msg.toolCallId, { details, dot: summary.querySelector('.tc-dot'), body });
+          }
+          break;
+        }
+        case 'toolCallUpdate': {
+          const entry = msg.toolCallId ? toolCallMap.get(msg.toolCallId) : null;
+          if (entry) {
+            // Update status dot
+            if (msg.status === 'completed') {
+              entry.dot.className = 'tc-dot done';
+            } else if (msg.status === 'failed') {
+              entry.dot.className = 'tc-dot failed';
+            }
+            // Add output row if present
+            if (msg.rawOutput !== undefined && msg.rawOutput !== null) {
+              const outputText = typeof msg.rawOutput === 'string'
+                ? msg.rawOutput
+                : JSON.stringify(msg.rawOutput, null, 2);
+              const row = document.createElement('div');
+              row.className = 'tc-row';
+              row.innerHTML = `<span class="tc-label">OUT</span><pre class="tc-content">${escapeHtml(outputText)}</pre>`;
+              entry.body.appendChild(row);
+              scrollBottom();
+            }
+          }
+          break;
+        }
+      }
+    });
+  </script>
+</body>
+</html>

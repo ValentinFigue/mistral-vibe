@@ -157,6 +157,24 @@ async def test_operator_runtime_error_is_recoverable(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reset_discards_prior_graph(tmp_path: Path) -> None:
+    tool, ctx = _tool(), _ctx(tmp_path)
+    await _run(tool, _raw_pipeline_patch(), ctx)  # graph now has s, c, ps, pc, m, r
+
+    # reset + a single block node: prior nodes are gone, no teardown ordering needed.
+    result = await _run(
+        tool,
+        GraphPatchArgs(
+            reset=True,
+            patch=[AddNode(node=Node(id="brief", op="weekly_margin_brief", params={"title": "Q1"}))],
+        ),
+        ctx,
+    )
+    assert set(result.fresh) == {"brief"}
+    assert "s" not in result.fresh and "s" not in result.cached  # old graph discarded
+
+
+@pytest.mark.asyncio
 async def test_invalid_patch_returns_tool_error(tmp_path: Path) -> None:
     tool, ctx = _tool(), _ctx(tmp_path)
     args = GraphPatchArgs(patch=[AddNode(node=Node(id="x", op="does_not_exist"))])

@@ -27,7 +27,12 @@ before authoring: reference only operators and blocks it lists.
 3. **Iterate cheaply.** To change the workflow, emit a small patch — a `set_param`, a
    `connect` — not a rebuild. Only the dirty subgraph recomputes; unchanged nodes are cached.
 4. **Read the feedback.** Each result shows `fresh` vs `cached` nodes and `outputs`. Use the
-   outputs to decide the next patch; stop when the terminal output satisfies the goal.
+   outputs to decide the next patch; stop when the terminal output satisfies the goal. If a
+   patch is rejected, the error says why (unknown operator, a column not in the data, a node
+   still consumed) — fix that and re-emit.
+5. **Starting over.** The graph persists across turns. To build a *different, unrelated*
+   workflow, set `reset: true` on the patch (it discards the current graph) rather than
+   removing old nodes one by one.
 
 ## Rules
 

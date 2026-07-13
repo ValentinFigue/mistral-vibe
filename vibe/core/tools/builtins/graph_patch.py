@@ -54,6 +54,11 @@ class GraphPatchArgs(BaseModel):
     patch: Patch = Field(
         description="Ordered list of typed edits to apply to the current workflow graph.",
     )
+    reset: bool = Field(
+        default=False,
+        description="Discard the current graph and apply this patch to an empty one. Use "
+        "to start a fresh, unrelated workflow instead of tearing down existing nodes.",
+    )
 
 
 class GraphPatchResult(BaseModel):
@@ -113,16 +118,19 @@ class GraphPatch(
     ) -> AsyncGenerator[GraphPatchResult, None]:
         graph_dir = self._graph_dir(ctx)
 
-        # Prefer in-memory state; fall back to the disk mirror so an agent-authored graph
-        # resumes after a restart (fresh tool instance with empty state).
-        graph_json = self.state.graph_json
-        if not graph_json:
-            mirror = graph_dir / "graph.json"
-            if mirror.exists():
-                graph_json = mirror.read_text()
-                self.state.graph_json = graph_json
-
-        current = Graph.model_validate_json(graph_json) if graph_json else Graph()
+        if args.reset:
+            # Start a fresh workflow — ignore any prior graph.
+            current = Graph()
+        else:
+            # Prefer in-memory state; fall back to the disk mirror so an agent-authored
+            # graph resumes after a restart (fresh tool instance with empty state).
+            graph_json = self.state.graph_json
+            if not graph_json:
+                mirror = graph_dir / "graph.json"
+                if mirror.exists():
+                    graph_json = mirror.read_text()
+                    self.state.graph_json = graph_json
+            current = Graph.model_validate_json(graph_json) if graph_json else Graph()
 
         # Apply the patch (pure) and reject an invalid result before executing anything.
         try:

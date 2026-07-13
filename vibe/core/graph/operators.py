@@ -23,12 +23,22 @@ from pydantic import BaseModel
 
 @dataclass(frozen=True)
 class OperatorSpec:
-    """Everything the executor needs to call and cache an operator."""
+    """Everything the executor needs to call and cache an operator.
+
+    ``param_names`` is every argument (used for arity checks). ``input_names`` is the subset
+    whose annotation is a Pydantic model — the arguments conventionally wired from upstream
+    nodes (``inputs``); the rest are literal ``params``. This split powers the catalog shown
+    to the agent so it knows how to author each node.
+    """
 
     name: str
     func: Callable[..., Awaitable[BaseModel]]
     param_names: tuple[str, ...]
     result_type: type[BaseModel]
+    input_names: tuple[str, ...] = ()
+
+    def literal_names(self) -> tuple[str, ...]:
+        return tuple(p for p in self.param_names if p not in self.input_names)
 
 
 _REGISTRY: dict[str, OperatorSpec] = {}
@@ -47,13 +57,21 @@ def operator(
             raise TypeError(f"operator {op_name!r} must be an async function")
 
         params = tuple(inspect.signature(fn).parameters)
-        result_type = get_type_hints(fn).get("return")
+        hints = get_type_hints(fn)
+        result_type = hints.get("return")
         if not (isinstance(result_type, type) and issubclass(result_type, BaseModel)):
             raise TypeError(
                 f"operator {op_name!r} must annotate a pydantic BaseModel return type"
             )
 
-        _REGISTRY[op_name] = OperatorSpec(op_name, fn, params, result_type)
+        input_names = tuple(
+            p
+            for p in params
+            if isinstance(hints.get(p), type) and issubclass(hints[p], BaseModel)
+        )
+        _REGISTRY[op_name] = OperatorSpec(
+            op_name, fn, params, result_type, input_names=input_names
+        )
         return fn
 
     return wrap(func) if func is not None else wrap
@@ -69,3 +87,8 @@ def get_operator(name: str) -> OperatorSpec:
 
 def is_registered(name: str) -> bool:
     return name in _REGISTRY
+
+
+def registered_operators() -> dict[str, OperatorSpec]:
+    """A snapshot of all registered operators (for catalogs shown to the agent)."""
+    return dict(_REGISTRY)

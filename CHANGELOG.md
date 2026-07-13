@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **[Experimental / internal]** Métier workflow-graph engine (`vibe/core/graph/`): a typed, content-addressed DAG with an incremental, resumable executor. Change one input and only the dirty subgraph re-runs; a killed run resumes from the last good node via a SQLite result cache. Not wired into the agent or CLI yet — see the headless demo `python -m vibe.core.graph.demo`.
+- **[Experimental / internal]** Métier agent-authoring layer (M3): the `graph_patch` builtin tool and the `graph` agent profile let an agent build a workflow by emitting typed, approval-gated `Patch`es instead of an opaque tool-call stream, executed incrementally. Reusable **blocks** (`vibe/core/graph/blocks.py`) package a subgraph as a named operator that expands inline, so reuse preserves fingerprinting and incremental recompute.
 
 ## [2.15.0] - 2026-06-12
 

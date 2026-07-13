@@ -31,6 +31,7 @@ from vibe.core.experiments.session import (
     hydrate_experiments_from_session as session_hydrate_experiments_from_session,
     initialize_experiments as session_initialize_experiments,
 )
+from vibe.core.graph.blocks import load_blocks as _load_graph_blocks
 from vibe.core.hooks.manager import HooksManager
 from vibe.core.hooks.models import HookConfigResult, HookEvent
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
@@ -299,6 +300,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             permission_getter=self._permission_store.get_tool_permission,
         )
         self.skill_manager = SkillManager(lambda: self.config)
+        if self.agent_profile.name == BuiltinAgentName.GRAPH:
+            # Only the graph profile uses blocks — avoid a disk scan for every other agent
+            # (and every subagent). Total: never raises.
+            _load_graph_blocks()
         self.message_observer = message_observer
         self._max_turns = max_turns
         self._max_price = max_price
@@ -1955,6 +1960,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             permission_getter=self._permission_store.get_tool_permission,
         )
         self.skill_manager = SkillManager(lambda: self.config)
+        if self.agent_profile.name == BuiltinAgentName.GRAPH:
+            # Only the graph profile uses blocks — avoid a disk scan for every other agent
+            # (and every subagent). Total: never raises.
+            _load_graph_blocks()
 
         new_system_prompt = get_universal_system_prompt(
             self.tool_manager,

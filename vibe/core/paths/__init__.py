@@ -7,6 +7,7 @@ from vibe.core.paths._local_config_files import (
     find_local_config_dirs,
 )
 from vibe.core.paths._vibe_home import (
+    BLOCKS_DIR,
     CACHE_FILE,
     DEFAULT_TOOL_DIR,
     GLOBAL_ENV_FILE,
@@ -24,6 +25,7 @@ from vibe.core.paths.conventions import AGENTS_MD_FILENAME
 __all__ = [
     "AGENTS_HOME",
     "AGENTS_MD_FILENAME",
+    "BLOCKS_DIR",
     "CACHE_FILE",
     "DEFAULT_TOOL_DIR",
     "GLOBAL_ENV_FILE",

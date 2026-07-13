@@ -14,7 +14,6 @@ the human reviews the typed diff at the approval gate before it is applied.
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from pathlib import Path
 from typing import ClassVar
 
 from pydantic import BaseModel, Field
@@ -36,6 +35,7 @@ from vibe.core.graph.executor import GraphValidationError, execute, validate
 from vibe.core.graph.model import Graph, NodeId, Patch, Value
 from vibe.core.graph.operators import registered_operators
 from vibe.core.graph.patch import PatchError, apply_patch, changed_nodes
+from vibe.core.graph.session_store import graph_dir as _session_graph_dir
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -116,7 +116,10 @@ class GraphPatch(
     async def run(
         self, args: GraphPatchArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[GraphPatchResult, None]:
-        graph_dir = self._graph_dir(ctx)
+        try:
+            graph_dir = _session_graph_dir(ctx)
+        except ValueError as exc:
+            raise ToolError(f"graph_patch requires a session directory: {exc}") from exc
 
         if args.reset:
             # Start a fresh workflow — ignore any prior graph.
@@ -170,15 +173,6 @@ class GraphPatch(
             outputs=outputs,
             catalog=_render_catalog(),
         )
-
-    @staticmethod
-    def _graph_dir(ctx: InvokeContext | None) -> Path:
-        base = (ctx.session_dir or ctx.scratchpad_dir) if ctx else None
-        if base is None:
-            raise ToolError("graph_patch requires a session or scratchpad directory")
-        graph_dir = base / "graph"
-        graph_dir.mkdir(parents=True, exist_ok=True)
-        return graph_dir
 
     @staticmethod
     def _collect_outputs(

@@ -33,6 +33,10 @@ before authoring: reference only operators and blocks it lists.
 5. **Starting over.** The graph persists across turns. To build a *different, unrelated*
    workflow, set `reset: true` on the patch (it discards the current graph) rather than
    removing old nodes one by one.
+6. **Saving reusable blocks.** When a subgraph is worth keeping, call `graph_save_block` to
+   promote it into a named block that persists across sessions and appears in the catalog.
+   Exclude source nodes and `expose_params` for the values that should vary, so the block
+   stays reusable rather than baking a one-off path or literal.
 
 ## Rules
 

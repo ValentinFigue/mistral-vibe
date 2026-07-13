@@ -11,6 +11,15 @@ Public surface:
 
 from __future__ import annotations
 
+from vibe.core.graph.blocks import (
+    BlockDef,
+    BlockError,
+    expand,
+    fold_report,
+    get_block,
+    is_block,
+    register_block,
+)
 from vibe.core.graph.cache import CacheStore
 from vibe.core.graph.executor import (
     GraphEvent,
@@ -20,25 +29,55 @@ from vibe.core.graph.executor import (
     validate,
 )
 from vibe.core.graph.fingerprint import content_hash, fingerprint_node
-from vibe.core.graph.model import Graph, Node, NodeId, Patch, Report, Value
+from vibe.core.graph.model import (
+    AddNode,
+    Connect,
+    Disconnect,
+    Graph,
+    Node,
+    NodeId,
+    Patch,
+    PatchOp,
+    RemoveNode,
+    Report,
+    SetParam,
+    Value,
+)
 from vibe.core.graph.operators import get_operator, is_registered, operator
+from vibe.core.graph.patch import PatchError, apply_patch, changed_nodes
 
 __all__ = [
+    "AddNode",
+    "BlockDef",
+    "BlockError",
     "CacheStore",
+    "Connect",
+    "Disconnect",
     "Graph",
     "GraphEvent",
     "GraphValidationError",
     "Node",
     "NodeId",
     "Patch",
+    "PatchError",
+    "PatchOp",
     "PurityError",
+    "RemoveNode",
     "Report",
+    "SetParam",
     "Value",
+    "apply_patch",
+    "changed_nodes",
     "content_hash",
     "execute",
+    "expand",
     "fingerprint_node",
+    "fold_report",
+    "get_block",
     "get_operator",
+    "is_block",
     "is_registered",
     "operator",
+    "register_block",
     "validate",
 ]

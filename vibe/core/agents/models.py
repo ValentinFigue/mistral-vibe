@@ -43,6 +43,7 @@ class BuiltinAgentName(StrEnum):
     AUTO_APPROVE = "auto-approve"
     EXPLORE = "explore"
     LEAN = "lean"
+    GRAPH = "graph"
 
 
 @dataclass(frozen=True)
@@ -198,6 +199,18 @@ LEAN = AgentProfile(
     },
 )
 
+GRAPH = AgentProfile(
+    name=BuiltinAgentName.GRAPH,
+    display_name="Graph",
+    description="Author and iterate a workflow graph via typed patches",
+    safety=AgentSafety.NEUTRAL,
+    agent_type=AgentType.AGENT,
+    overrides={
+        "enabled_tools": ["graph_patch", "ask_user_question"],
+        "system_prompt_id": "graph",
+    },
+)
+
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.DEFAULT: DEFAULT,
     BuiltinAgentName.PLAN: PLAN,
@@ -205,4 +218,5 @@ BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,
     BuiltinAgentName.EXPLORE: EXPLORE,
     BuiltinAgentName.LEAN: LEAN,
+    BuiltinAgentName.GRAPH: GRAPH,
 }

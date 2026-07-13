@@ -106,13 +106,24 @@ async def execute(
     *,
     on_event: Callable[[GraphEvent], None] | None = None,
     verify_purity: bool = False,
+    expand_blocks: bool = True,
 ) -> tuple[dict[NodeId, Value], Report]:
     """Execute ``graph``, returning value handles per node and an execution :class:`Report`.
 
     With ``cache=None`` every node runs (the M0 trivial executor). With a cache, unchanged
     nodes are served from it. ``verify_purity`` re-runs each cached node and asserts the
     fresh output matches the cached one — a debug guard against secretly-impure operators.
+
+    ``expand_blocks`` (default True) replaces any block nodes with their subgraphs first, so
+    the returned handles/report are keyed by *expanded* node ids. It is identity when the
+    graph has no block ops. Callers that need results keyed by authored ids should expand
+    themselves (``blocks.expand``) and fold the report with ``blocks.fold_report``.
     """
+    if expand_blocks:
+        from vibe.core.graph.blocks import expand
+
+        graph, _ = expand(graph)
+
     validate(graph)
 
     indegree = {nid: len(node.inputs) for nid, node in graph.nodes.items()}

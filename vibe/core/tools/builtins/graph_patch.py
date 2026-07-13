@@ -139,7 +139,10 @@ class GraphPatch(
 
         cache = CacheStore(graph_dir / "cache.sqlite")
         try:
-            values, report = await execute(expanded, cache, expand_blocks=False)
+            try:
+                values, report = await execute(expanded, cache, expand_blocks=False)
+            except Exception as exc:  # operator raised at runtime — surface as recoverable
+                raise ToolError(f"graph execution failed: {exc}") from exc
             folded = fold_report(report, fold)
             outputs = self._collect_outputs(new, values, cache)
         finally:

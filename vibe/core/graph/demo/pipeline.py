@@ -52,6 +52,11 @@ async def parse_table(file: FileContent, amount_col: str) -> Table:
     """Parse a two-column ``region,<amount_col>`` CSV into ``{region: amount}``."""
     lines = [line for line in file.text.strip().splitlines() if line]
     header = lines[0].split(",")
+    for col in ("region", amount_col):
+        if col not in header:
+            raise ValueError(
+                f"parse_table: column {col!r} not found; available columns are {header}"
+            )
     region_idx = header.index("region")
     amount_idx = header.index(amount_col)
     by_region: dict[str, float] = {}

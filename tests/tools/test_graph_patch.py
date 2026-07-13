@@ -129,6 +129,33 @@ async def test_weekly_brief_block_is_one_node(tmp_path: Path) -> None:
     assert "# Q3" in result.outputs["brief"]
 
 
+def _raw_pipeline_patch(amount_col_sales: str = "revenue") -> GraphPatchArgs:
+    """Compose the brief from raw operators (no block), like the 'compose from parts' prompt."""
+    return GraphPatchArgs(
+        patch=[
+            AddNode(node=Node(id="s", op="sales_source")),
+            AddNode(node=Node(id="c", op="costs_source")),
+            AddNode(node=Node(id="ps", op="parse_table", params={"amount_col": amount_col_sales}, inputs={"file": "s"})),
+            AddNode(node=Node(id="pc", op="parse_table", params={"amount_col": "cost"}, inputs={"file": "c"})),
+            AddNode(node=Node(id="m", op="join_margin", inputs={"sales": "ps", "costs": "pc"})),
+            AddNode(node=Node(id="r", op="format_report", params={"title": "V1"}, inputs={"margins": "m"})),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_compose_from_raw_operators(tmp_path: Path) -> None:
+    result = await _run(_tool(), _raw_pipeline_patch(), _ctx(tmp_path))
+    assert "r" in result.fresh and "# V1" in result.outputs["r"]
+
+
+@pytest.mark.asyncio
+async def test_operator_runtime_error_is_recoverable(tmp_path: Path) -> None:
+    # Wrong column name (the failure the user hit) → a clear, recoverable ToolError.
+    with pytest.raises(ToolError, match=r"execution failed.*not found.*available columns"):
+        await _run(_tool(), _raw_pipeline_patch(amount_col_sales="amount"), _ctx(tmp_path))
+
+
 @pytest.mark.asyncio
 async def test_invalid_patch_returns_tool_error(tmp_path: Path) -> None:
     tool, ctx = _tool(), _ctx(tmp_path)

@@ -206,7 +206,7 @@ GRAPH = AgentProfile(
     safety=AgentSafety.NEUTRAL,
     agent_type=AgentType.AGENT,
     overrides={
-        "enabled_tools": ["graph_patch", "ask_user_question"],
+        "enabled_tools": ["graph_patch", "graph_save_block", "ask_user_question"],
         "system_prompt_id": "graph",
     },
 )

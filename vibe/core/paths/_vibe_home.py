@@ -34,5 +34,6 @@ LOG_FILE = GlobalPath(lambda: VIBE_HOME.path / "logs" / "vibe.log")
 CACHE_FILE = GlobalPath(lambda: VIBE_HOME.path / "cache.toml")
 HISTORY_FILE = GlobalPath(lambda: VIBE_HOME.path / "vibehistory")
 PLANS_DIR = GlobalPath(lambda: VIBE_HOME.path / "plans")
+BLOCKS_DIR = GlobalPath(lambda: VIBE_HOME.path / "blocks")
 
 DEFAULT_TOOL_DIR = GlobalPath(lambda: VIBE_ROOT / "core" / "tools" / "builtins")

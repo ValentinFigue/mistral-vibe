@@ -14,11 +14,14 @@ from __future__ import annotations
 from vibe.core.graph.blocks import (
     BlockDef,
     BlockError,
+    block_from_subgraph,
     expand,
     fold_report,
     get_block,
     is_block,
+    load_blocks,
     register_block,
+    save_block,
 )
 from vibe.core.graph.cache import CacheStore
 from vibe.core.graph.executor import (
@@ -67,6 +70,7 @@ __all__ = [
     "SetParam",
     "Value",
     "apply_patch",
+    "block_from_subgraph",
     "changed_nodes",
     "content_hash",
     "execute",
@@ -77,7 +81,9 @@ __all__ = [
     "get_operator",
     "is_block",
     "is_registered",
+    "load_blocks",
     "operator",
     "register_block",
+    "save_block",
     "validate",
 ]

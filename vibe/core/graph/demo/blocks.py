@@ -37,10 +37,35 @@ MARGIN_BRIEF = BlockDef(
 )
 
 
+def _weekly_subgraph() -> Graph:
+    """The full pipeline over the bundled demo sources — no open inputs."""
+    g = Graph()
+    g.add(Node(id="sales", op="sales_source"))
+    g.add(Node(id="costs", op="costs_source"))
+    g.add(Node(id="parse_sales", op="parse_table", params={"amount_col": "revenue"}, inputs={"file": "sales"}))
+    g.add(Node(id="parse_costs", op="parse_table", params={"amount_col": "cost"}, inputs={"file": "costs"}))
+    g.add(Node(id="margin", op="join_margin", inputs={"sales": "parse_sales", "costs": "parse_costs"}))
+    g.add(Node(id="report", op="format_report", inputs={"margins": "margin"}))
+    return g
+
+
+# A one-node brief: the agent only supplies a `title`. The clean happy path for the
+# `graph` profile — no filesystem paths, no wiring, no hashes.
+WEEKLY_MARGIN_BRIEF = BlockDef(
+    name="weekly_margin_brief",
+    graph=_weekly_subgraph(),
+    input_ports={},
+    params={"title": ("report", "title")},
+    output="report",
+)
+
+
 def register() -> None:
-    """Register the demo block (idempotent)."""
+    """Register the demo blocks (idempotent)."""
     if not is_block(MARGIN_BRIEF.name):
         register_block(MARGIN_BRIEF)
+    if not is_block(WEEKLY_MARGIN_BRIEF.name):
+        register_block(WEEKLY_MARGIN_BRIEF)
 
 
 register()

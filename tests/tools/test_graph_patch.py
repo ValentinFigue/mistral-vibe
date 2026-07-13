@@ -109,6 +109,27 @@ async def test_resumes_from_disk_mirror_after_restart(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_patch_returns_catalog(tmp_path: Path) -> None:
+    # The agent's first move: an empty patch runs nothing but reveals what it can build.
+    result = await _run(_tool(), GraphPatchArgs(patch=[]), _ctx(tmp_path))
+    assert result.applied
+    assert result.fresh == [] and result.cached == []
+    assert "weekly_margin_brief" in result.catalog
+    assert "sales_source" in result.catalog
+
+
+@pytest.mark.asyncio
+async def test_weekly_brief_block_is_one_node(tmp_path: Path) -> None:
+    # The happy path: no paths, no wiring, no hashes — just a title.
+    args = GraphPatchArgs(
+        patch=[AddNode(node=Node(id="brief", op="weekly_margin_brief", params={"title": "Q3"}))]
+    )
+    result = await _run(_tool(), args, _ctx(tmp_path))
+    assert result.fresh == ["brief"]
+    assert "# Q3" in result.outputs["brief"]
+
+
+@pytest.mark.asyncio
 async def test_invalid_patch_returns_tool_error(tmp_path: Path) -> None:
     tool, ctx = _tool(), _ctx(tmp_path)
     args = GraphPatchArgs(patch=[AddNode(node=Node(id="x", op="does_not_exist"))])

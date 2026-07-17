@@ -179,6 +179,16 @@ class CommandRegistry:
                 description="Select theme",
                 handler="_show_theme",
             ),
+            "graph": Command(
+                aliases=frozenset(["/graph"]),
+                description="Show the current workflow graph (or /graph <node> to inspect one)",
+                handler="_show_graph",
+            ),
+            "blocks": Command(
+                aliases=frozenset(["/blocks"]),
+                description="List saved graph blocks (/blocks show|rm <name>)",
+                handler="_show_blocks",
+            ),
         }
 
     @property

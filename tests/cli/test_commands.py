@@ -33,6 +33,13 @@ class TestCommandRegistry:
         assert registry.get_command_name("  /help  ") == "help"
         assert registry.get_command_name("/HELP") == "help"
 
+    def test_graph_and_blocks_commands_registered(self) -> None:
+        registry = CommandRegistry()
+        assert registry.get_command_name("/graph") == "graph"
+        assert registry.get_command_name("/blocks") == "blocks"
+        assert registry.commands["graph"].handler == "_show_graph"
+        assert registry.commands["blocks"].handler == "_show_blocks"
+
     def test_get_command_name_returns_none_for_unknown(self) -> None:
         registry = CommandRegistry()
         assert registry.get_command_name("/unknown") is None

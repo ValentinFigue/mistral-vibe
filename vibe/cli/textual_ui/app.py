@@ -76,6 +76,7 @@ from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenS
 from vibe.cli.textual_ui.widgets.debug_console import DebugConsole
 from vibe.cli.textual_ui.widgets.feedback_bar import FeedbackBar
 from vibe.cli.textual_ui.widgets.feedback_bar_manager import FeedbackBarManager
+from vibe.cli.textual_ui.widgets.graph_app import GraphApp, NodeView as GraphNodeView
 from vibe.cli.textual_ui.widgets.load_more import HistoryLoadMoreRequested
 from vibe.cli.textual_ui.widgets.loading import (
     DEFAULT_LOADING_STATUS,
@@ -232,6 +233,7 @@ class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
     ConnectorAuth = auto()
+    Graph = auto()
     Input = auto()
     MCP = auto()
     ModelPicker = auto()
@@ -1164,6 +1166,9 @@ class VibeApp(App):  # noqa: PLR0904
         self, message: ThemePickerApp.Cancelled
     ) -> None:
         self._apply_theme(message.original_theme)
+        await self._switch_to_input_app()
+
+    async def on_graph_app_closed(self, _message: GraphApp.Closed) -> None:
         await self._switch_to_input_app()
 
     async def on_mcpapp_mcpclosed(self, _message: MCPApp.MCPClosed) -> None:
@@ -2116,6 +2121,168 @@ class VibeApp(App):  # noqa: PLR0904
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
+    def _graph_cache_view(
+        self, graph: Any, session_dir: Any
+    ) -> tuple[dict[str, bool] | None, dict[str, str] | None]:
+        """Read-only cache lookup: (materialized-per-node, output-preview-per-node).
+
+        Opens ``cache.sqlite`` in read-only mode (never instantiates CacheStore, which would
+        create/migrate the file just from viewing). Returns ``(None, None)`` if the cache is
+        absent/locked or expansion fails — the caller then shows structure only.
+        """
+        import sqlite3
+
+        from vibe.core.graph import render
+        from vibe.core.graph.fingerprint import fingerprint_node
+
+        cache_path = session_dir / "graph" / "cache.sqlite"
+        if not cache_path.exists():
+            return None, None
+        try:
+            conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+        except sqlite3.OperationalError:
+            return None, None
+
+        class _RO:
+            def get(self, fingerprint: str) -> bytes | None:
+                row = conn.execute(
+                    "SELECT 1 FROM results WHERE fingerprint = ?", (fingerprint,)
+                ).fetchone()
+                return b"" if row else None
+
+        try:
+            status = render.graph_status(graph, _RO())
+            expanded, producing = render.output_ids(graph)
+            memo: dict[str, str] = {}
+            outputs: dict[str, str] = {}
+            for nid, eid in producing.items():
+                row = conn.execute(
+                    "SELECT payload FROM results WHERE fingerprint = ?",
+                    (fingerprint_node(expanded, eid, memo),),
+                ).fetchone()
+                if row is not None:
+                    outputs[nid] = row[0].decode(errors="replace")
+            return status, outputs
+        except Exception:
+            return None, None
+        finally:
+            conn.close()
+
+    def _load_graph_and_states(self, session_dir: Any) -> tuple[Any, Any]:
+        """Load the session graph + last-run states from disk; ``(None, None)`` if absent."""
+        from vibe.core.graph.model import Graph, Report
+
+        graph_path = (session_dir / "graph" / "graph.json") if session_dir else None
+        if graph_path is None or not graph_path.exists():
+            return None, None
+        graph = Graph.model_validate_json(graph_path.read_text())
+        states = None
+        report_path = session_dir / "graph" / "report.json"
+        if report_path.exists():
+            try:
+                states = Report.model_validate_json(report_path.read_text()).states
+            except Exception:
+                states = None
+        return graph, states
+
+    def _node_views(
+        self, graph: Any, states: Any, status: Any, outputs: Any
+    ) -> list[GraphNodeView]:
+        from vibe.core.graph import render
+
+        views: list[GraphNodeView] = []
+        for nid in render.topo_order(graph):
+            node = graph.nodes[nid]
+            views.append(
+                GraphNodeView(
+                    id=nid,
+                    op=node.op,
+                    inputs=dict(node.inputs),
+                    params=dict(node.params),
+                    state=(states or {}).get(nid),
+                    cached=(status or {}).get(nid),
+                    output=(outputs or {}).get(nid),
+                )
+            )
+        return views
+
+    async def _show_graph(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.graph import render
+
+        if self._current_bottom_app == BottomApp.Graph:
+            return
+
+        session_dir = self.agent_loop.session_logger.session_dir
+        graph, states = self._load_graph_and_states(session_dir)
+        if graph is None:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    "No workflow graph in this session yet — run with `--agent graph` and build one."
+                )
+            )
+            return
+
+        status, outputs = self._graph_cache_view(graph, session_dir)
+        views = self._node_views(graph, states, status, outputs)
+        panel = GraphApp(
+            f"Workflow graph — {len(views)} nodes", views, render.to_mermaid(graph, states)
+        )
+        await self._switch_from_input(panel)
+
+    async def _show_blocks(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.graph import render
+        from vibe.core.graph.blocks import registered_blocks
+        from vibe.core.paths import BLOCKS_DIR
+
+        parts = cmd_args.split()
+        blocks = registered_blocks()
+
+        if not parts:
+            sources = {
+                name: (str(BLOCKS_DIR.path / f"{name}.json") if (BLOCKS_DIR.path / f"{name}.json").exists() else "built-in")
+                for name in blocks
+            }
+            md = f"## Blocks — {len(blocks)}\n\n" + render.blocks_table(blocks, sources)
+            await self._mount_and_scroll(UserCommandMessage(md))
+            return
+
+        sub = parts[0]
+        name = parts[1] if len(parts) > 1 else None
+
+        if sub == "show" and name:
+            block = blocks.get(name)
+            if block is None:
+                await self._mount_and_scroll(UserCommandMessage(f"No block `{name}`. Run `/blocks` to list them."))
+                return
+            views = self._node_views(block.graph, None, None, None)
+            panel = GraphApp(f"Block `{name}`", views, render.to_mermaid(block.graph))
+            await self._switch_from_input(panel)
+            return
+
+        if sub == "rm" and name:
+            block_file = BLOCKS_DIR.path / f"{name}.json"
+            if not block_file.exists():
+                await self._mount_and_scroll(
+                    UserCommandMessage(f"`{name}` is not a saved block (built-in or unknown) — nothing to delete.")
+                )
+                return
+            if "--yes" not in parts:
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"Will delete `{block_file}`. Re-run `/blocks rm {name} --yes` to confirm."
+                    )
+                )
+                return
+            block_file.unlink()
+            await self._mount_and_scroll(
+                UserCommandMessage(f"Deleted `{block_file}`. (Stays registered in memory until restart.)")
+            )
+            return
+
+        await self._mount_and_scroll(
+            UserCommandMessage("Usage: `/blocks` · `/blocks show <name>` · `/blocks rm <name> --yes`")
+        )
+
     async def _show_config(self, **kwargs: Any) -> None:
         """Switch to the configuration app in the bottom panel."""
         if self._current_bottom_app == BottomApp.Config:
@@ -2813,7 +2980,7 @@ class VibeApp(App):  # noqa: PLR0904
             if self._chat_widget.is_at_bottom:
                 self.call_after_refresh(self._chat_widget.anchor)
 
-    def _focus_current_bottom_app(self) -> None:
+    def _focus_current_bottom_app(self) -> None:  # noqa: PLR0912 (one case per bottom app)
         try:
             match self._current_bottom_app:
                 case BottomApp.Input:
@@ -2836,6 +3003,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(SessionPickerApp).focus()
                 case BottomApp.MCP:
                     self.query_one(MCPApp).focus()
+                case BottomApp.Graph:
+                    self.query_one(GraphApp).focus()
                 case BottomApp.ConnectorAuth:
                     self.query_one(ConnectorAuthApp).focus()
                 case BottomApp.Rewind:
@@ -3131,7 +3300,8 @@ class VibeApp(App):  # noqa: PLR0904
         self.run_worker(self._interrupt_agent_loop(), exclusive=False)
 
     def _handle_bottom_app_close_escape(
-        self, widget_type: type[MCPApp] | type[ProxySetupApp] | type[ConnectorAuthApp]
+        self,
+        widget_type: type[MCPApp] | type[ProxySetupApp] | type[ConnectorAuthApp] | type[GraphApp],
     ) -> None:
         try:
             self.query_one(widget_type).action_close()
@@ -3144,6 +3314,8 @@ class VibeApp(App):  # noqa: PLR0904
             self._handle_config_app_escape()
         elif self._current_bottom_app == BottomApp.Voice:
             self._handle_voice_app_escape()
+        elif self._current_bottom_app == BottomApp.Graph:
+            self._handle_bottom_app_close_escape(GraphApp)
         elif self._current_bottom_app == BottomApp.MCP:
             self._handle_bottom_app_close_escape(MCPApp)
         elif self._current_bottom_app == BottomApp.ConnectorAuth:

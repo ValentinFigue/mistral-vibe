@@ -11,6 +11,8 @@ from collections.abc import Mapping
 import re
 from typing import Protocol
 
+from rich.text import Text
+
 from vibe.core.graph.blocks import BlockDef, expand
 from vibe.core.graph.fingerprint import fingerprint_node
 from vibe.core.graph.model import Graph, NodeId, NodeState
@@ -68,7 +70,11 @@ def to_mermaid(graph: Graph, states: Mapping[NodeId, NodeState] | None = None) -
 
 
 def to_tree(graph: Graph, states: Mapping[NodeId, NodeState] | None = None) -> list[str]:
-    """One adjacency line per node in topological order, e.g. ``report · format_report``."""
+    """One adjacency line per node in topological order, e.g. ``report · format_report``.
+
+    Not used by the interactive CLI panel (which renders via :func:`node_line`); retained for
+    the deferred ACP/markdown rendering surface and covered by tests.
+    """
     lines: list[str] = []
     for nid in topo_order(graph):
         node = graph.nodes[nid]
@@ -117,6 +123,70 @@ def _truncate(text: str) -> str:
     return text if len(text) <= _MAX_PREVIEW else text[:_MAX_PREVIEW] + "…"
 
 
+# --- Rich renderers for the interactive panel (shared with the widget + its tests) ---
+# All build rich Text via append (never markup), so arbitrary node text can't inject markup.
+
+_DETAIL_MAX = 400
+
+
+def _state_glyph(state: str | None, cached: bool | None) -> tuple[str, str]:
+    if state == "fresh":
+        return "●", "green"
+    if state == "cached":
+        return "○", "cyan"
+    if cached is True:
+        return "◍", "dim"
+    if cached is False:
+        return "·", "dim"
+    return "", ""
+
+
+def node_line(
+    node_id: NodeId,
+    op: str,
+    inputs: Mapping[str, NodeId],
+    state: str | None = None,
+    cached: bool | None = None,
+) -> Text:
+    """One-line node label for the panel's option list (glyph + id·op + upstream hint)."""
+    line = Text(no_wrap=True)
+    glyph, style = _state_glyph(state, cached)
+    if glyph:
+        line.append(f"{glyph} ", style=style)
+    line.append(f"{node_id} · {op}")
+    if inputs:
+        line.append("  ← " + ", ".join(inputs.values()), style="dim")
+    return line
+
+
+def node_detail(
+    node_id: NodeId,
+    op: str,
+    inputs: Mapping[str, NodeId],
+    params: Mapping[str, object],
+    state: str | None = None,
+    cached: bool | None = None,
+    output: str | None = None,
+) -> Text:
+    """Multi-line detail view for one node (right pane). Markup-safe (Text.append)."""
+    detail = Text()
+    detail.append(f"{node_id}\n", style="bold")
+    detail.append(f"op: {op}\n")
+    if state is not None:
+        detail.append(f"last run: {state}\n")
+    if cached is not None:
+        detail.append(f"cached: {'yes' if cached else 'no'}\n")
+    detail.append("\ninputs:\n", style="bold")
+    detail.append("".join(f"  {port} ← {dep}\n" for port, dep in inputs.items()) or "  (none)\n")
+    detail.append("\nparams:\n", style="bold")
+    detail.append("".join(f"  {k} = {v}\n" for k, v in params.items()) or "  (none)\n")
+    if output:
+        clipped = output if len(output) <= _DETAIL_MAX else output[:_DETAIL_MAX] + "…"
+        detail.append("\noutput:\n", style="bold")
+        detail.append(clipped)
+    return detail
+
+
 def nodes_table(
     graph: Graph,
     *,
@@ -124,7 +194,11 @@ def nodes_table(
     status: Mapping[NodeId, bool] | None = None,
     outputs: Mapping[NodeId, str] | None = None,
 ) -> str:
-    """Markdown table: node · op · inputs · last run · cached · output preview."""
+    """Markdown table: node · op · inputs · last run · cached · output preview.
+
+    Not used by the interactive CLI panel; retained for the deferred ACP/markdown surface
+    and covered by tests.
+    """
     rows = ["| node | op | inputs | last run | cached | output |", "|---|---|---|---|---|---|"]
     for nid in topo_order(graph):
         node = graph.nodes[nid]

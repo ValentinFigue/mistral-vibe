@@ -76,6 +76,7 @@ from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenS
 from vibe.cli.textual_ui.widgets.debug_console import DebugConsole
 from vibe.cli.textual_ui.widgets.feedback_bar import FeedbackBar
 from vibe.cli.textual_ui.widgets.feedback_bar_manager import FeedbackBarManager
+from vibe.cli.textual_ui.widgets.graph_app import GraphApp, NodeView as GraphNodeView
 from vibe.cli.textual_ui.widgets.load_more import HistoryLoadMoreRequested
 from vibe.cli.textual_ui.widgets.loading import (
     DEFAULT_LOADING_STATUS,
@@ -232,6 +233,7 @@ class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
     ConnectorAuth = auto()
+    Graph = auto()
     Input = auto()
     MCP = auto()
     ModelPicker = auto()
@@ -1164,6 +1166,9 @@ class VibeApp(App):  # noqa: PLR0904
         self, message: ThemePickerApp.Cancelled
     ) -> None:
         self._apply_theme(message.original_theme)
+        await self._switch_to_input_app()
+
+    async def on_graph_app_closed(self, _message: GraphApp.Closed) -> None:
         await self._switch_to_input_app()
 
     async def on_mcpapp_mcpclosed(self, _message: MCPApp.MCPClosed) -> None:
@@ -2116,8 +2121,6 @@ class VibeApp(App):  # noqa: PLR0904
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
-    _GRAPH_NODE_CAP = 40
-
     def _graph_cache_view(
         self, graph: Any, session_dir: Any
     ) -> tuple[dict[str, bool] | None, dict[str, str] | None]:
@@ -2182,22 +2185,32 @@ class VibeApp(App):  # noqa: PLR0904
                 states = None
         return graph, states
 
-    async def _show_graph_node(self, graph: Any, session_dir: Any, states: Any, nid: str) -> None:
-        node = graph.nodes[nid]
-        _, outputs = self._graph_cache_view(graph, session_dir)
-        wiring = "\n".join(f"  - `{p}` ← `{d}`" for p, d in node.inputs.items()) or "  (none)"
-        params = "\n".join(f"  - `{k}` = `{v}`" for k, v in node.params.items()) or "  (none)"
-        out = (outputs or {}).get(nid, "")
-        out_block = f"\n\n**Output**\n```text\n{out[:800]}\n```" if out else ""
-        state = states.get(nid) if states else None
-        md = (
-            f"## Node `{nid}` · {node.op}\n\n**Last run:** {state or '—'}\n\n"
-            f"**Inputs**\n{wiring}\n\n**Params**\n{params}{out_block}"
-        )
-        await self._mount_and_scroll(UserCommandMessage(md))
+    def _node_views(
+        self, graph: Any, states: Any, status: Any, outputs: Any
+    ) -> list[GraphNodeView]:
+        from vibe.core.graph import render
+
+        views: list[GraphNodeView] = []
+        for nid in render.topo_order(graph):
+            node = graph.nodes[nid]
+            views.append(
+                GraphNodeView(
+                    id=nid,
+                    op=node.op,
+                    inputs=dict(node.inputs),
+                    params=dict(node.params),
+                    state=(states or {}).get(nid),
+                    cached=(status or {}).get(nid),
+                    output=(outputs or {}).get(nid),
+                )
+            )
+        return views
 
     async def _show_graph(self, cmd_args: str = "", **kwargs: Any) -> None:
         from vibe.core.graph import render
+
+        if self._current_bottom_app == BottomApp.Graph:
+            return
 
         session_dir = self.agent_loop.session_logger.session_dir
         graph, states = self._load_graph_and_states(session_dir)
@@ -2209,35 +2222,12 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return
 
-        arg = cmd_args.strip()
-        if arg and arg != "all":
-            if arg not in graph.nodes:
-                await self._mount_and_scroll(
-                    UserCommandMessage(f"No node `{arg}`. Run `/graph` to list the graph.")
-                )
-                return
-            await self._show_graph_node(graph, session_dir, states, arg)
-            return
-
-        count = len(graph.nodes)
-        tree = render.to_tree(graph, states)
-        if count > self._GRAPH_NODE_CAP and arg != "all":
-            shown = "\n".join(f"- {line}" for line in tree[: self._GRAPH_NODE_CAP])
-            md = (
-                f"## Workflow graph — {count} nodes\n\n{shown}\n\n"
-                f"_… {count - self._GRAPH_NODE_CAP} more. Run `/graph all` for the full table + diagram._"
-            )
-            await self._mount_and_scroll(UserCommandMessage(md))
-            return
-
         status, outputs = self._graph_cache_view(graph, session_dir)
-        table = render.nodes_table(graph, states=states, status=status, outputs=outputs)
-        tree_md = "\n".join(f"- {line}" for line in tree)
-        md = (
-            f"## Workflow graph — {count} nodes\n\n{tree_md}\n\n"
-            f"{table}\n\n```mermaid\n{render.to_mermaid(graph, states)}\n```"
+        views = self._node_views(graph, states, status, outputs)
+        panel = GraphApp(
+            f"Workflow graph — {len(views)} nodes", views, render.to_mermaid(graph, states)
         )
-        await self._mount_and_scroll(UserCommandMessage(md))
+        await self._switch_from_input(panel)
 
     async def _show_blocks(self, cmd_args: str = "", **kwargs: Any) -> None:
         from vibe.core.graph import render
@@ -2264,15 +2254,9 @@ class VibeApp(App):  # noqa: PLR0904
             if block is None:
                 await self._mount_and_scroll(UserCommandMessage(f"No block `{name}`. Run `/blocks` to list them."))
                 return
-            tree = "\n".join(f"- {line}" for line in render.to_tree(block.graph))
-            ports = ", ".join(block.input_ports) or "—"
-            params = ", ".join(block.params) or "—"
-            md = (
-                f"## Block `{name}`\n\n"
-                f"**inputs:** {ports}  ·  **params:** {params}  ·  **output:** `{block.output}`\n\n"
-                f"{tree}\n\n```mermaid\n{render.to_mermaid(block.graph)}\n```"
-            )
-            await self._mount_and_scroll(UserCommandMessage(md))
+            views = self._node_views(block.graph, None, None, None)
+            panel = GraphApp(f"Block `{name}`", views, render.to_mermaid(block.graph))
+            await self._switch_from_input(panel)
             return
 
         if sub == "rm" and name:
@@ -2996,7 +2980,7 @@ class VibeApp(App):  # noqa: PLR0904
             if self._chat_widget.is_at_bottom:
                 self.call_after_refresh(self._chat_widget.anchor)
 
-    def _focus_current_bottom_app(self) -> None:
+    def _focus_current_bottom_app(self) -> None:  # noqa: PLR0912 (one case per bottom app)
         try:
             match self._current_bottom_app:
                 case BottomApp.Input:
@@ -3019,6 +3003,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(SessionPickerApp).focus()
                 case BottomApp.MCP:
                     self.query_one(MCPApp).focus()
+                case BottomApp.Graph:
+                    self.query_one(GraphApp).focus()
                 case BottomApp.ConnectorAuth:
                     self.query_one(ConnectorAuthApp).focus()
                 case BottomApp.Rewind:
@@ -3314,7 +3300,8 @@ class VibeApp(App):  # noqa: PLR0904
         self.run_worker(self._interrupt_agent_loop(), exclusive=False)
 
     def _handle_bottom_app_close_escape(
-        self, widget_type: type[MCPApp] | type[ProxySetupApp] | type[ConnectorAuthApp]
+        self,
+        widget_type: type[MCPApp] | type[ProxySetupApp] | type[ConnectorAuthApp] | type[GraphApp],
     ) -> None:
         try:
             self.query_one(widget_type).action_close()
@@ -3327,6 +3314,8 @@ class VibeApp(App):  # noqa: PLR0904
             self._handle_config_app_escape()
         elif self._current_bottom_app == BottomApp.Voice:
             self._handle_voice_app_escape()
+        elif self._current_bottom_app == BottomApp.Graph:
+            self._handle_bottom_app_close_escape(GraphApp)
         elif self._current_bottom_app == BottomApp.MCP:
             self._handle_bottom_app_close_escape(MCPApp)
         elif self._current_bottom_app == BottomApp.ConnectorAuth:

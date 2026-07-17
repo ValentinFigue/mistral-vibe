@@ -95,3 +95,26 @@ def test_blocks_table_lists_blocks() -> None:
     table = blocks_table(blocks, {name: "built-in" for name in blocks})
     assert "margin_brief" in table
     assert "weekly_margin_brief" in table
+
+
+def test_node_line_and_detail_are_markup_safe() -> None:
+    from vibe.core.graph.render import node_detail, node_line
+
+    line = node_line("report", "format_report", {"margins": "m"}, state="fresh")
+    assert "report · format_report" in str(line)
+    assert "← m" in str(line)
+
+    # Arbitrary bracketed text (looks like Rich markup) must render as literal, not crash.
+    detail = node_detail(
+        "report", "format_report", {"margins": "m"}, {"title": "[bold]x[/]"},
+        state="fresh", cached=True, output='{"md":"[x] Q3"}',
+    )
+    text = str(detail)
+    assert "[bold]x[/]" in text and "[x] Q3" in text and "last run: fresh" in text
+
+
+def test_node_detail_omits_run_data_when_none() -> None:
+    from vibe.core.graph.render import node_detail
+
+    text = str(node_detail("a", "src", {}, {}, state=None, cached=None, output=None))
+    assert "last run" not in text and "cached" not in text

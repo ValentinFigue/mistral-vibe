@@ -2116,6 +2116,189 @@ class VibeApp(App):  # noqa: PLR0904
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
+    _GRAPH_NODE_CAP = 40
+
+    def _graph_cache_view(
+        self, graph: Any, session_dir: Any
+    ) -> tuple[dict[str, bool] | None, dict[str, str] | None]:
+        """Read-only cache lookup: (materialized-per-node, output-preview-per-node).
+
+        Opens ``cache.sqlite`` in read-only mode (never instantiates CacheStore, which would
+        create/migrate the file just from viewing). Returns ``(None, None)`` if the cache is
+        absent/locked or expansion fails — the caller then shows structure only.
+        """
+        import sqlite3
+
+        from vibe.core.graph import render
+        from vibe.core.graph.fingerprint import fingerprint_node
+
+        cache_path = session_dir / "graph" / "cache.sqlite"
+        if not cache_path.exists():
+            return None, None
+        try:
+            conn = sqlite3.connect(f"file:{cache_path}?mode=ro", uri=True)
+        except sqlite3.OperationalError:
+            return None, None
+
+        class _RO:
+            def get(self, fingerprint: str) -> bytes | None:
+                row = conn.execute(
+                    "SELECT 1 FROM results WHERE fingerprint = ?", (fingerprint,)
+                ).fetchone()
+                return b"" if row else None
+
+        try:
+            status = render.graph_status(graph, _RO())
+            expanded, producing = render.output_ids(graph)
+            memo: dict[str, str] = {}
+            outputs: dict[str, str] = {}
+            for nid, eid in producing.items():
+                row = conn.execute(
+                    "SELECT payload FROM results WHERE fingerprint = ?",
+                    (fingerprint_node(expanded, eid, memo),),
+                ).fetchone()
+                if row is not None:
+                    outputs[nid] = row[0].decode(errors="replace")
+            return status, outputs
+        except Exception:
+            return None, None
+        finally:
+            conn.close()
+
+    def _load_graph_and_states(self, session_dir: Any) -> tuple[Any, Any]:
+        """Load the session graph + last-run states from disk; ``(None, None)`` if absent."""
+        from vibe.core.graph.model import Graph, Report
+
+        graph_path = (session_dir / "graph" / "graph.json") if session_dir else None
+        if graph_path is None or not graph_path.exists():
+            return None, None
+        graph = Graph.model_validate_json(graph_path.read_text())
+        states = None
+        report_path = session_dir / "graph" / "report.json"
+        if report_path.exists():
+            try:
+                states = Report.model_validate_json(report_path.read_text()).states
+            except Exception:
+                states = None
+        return graph, states
+
+    async def _show_graph_node(self, graph: Any, session_dir: Any, states: Any, nid: str) -> None:
+        node = graph.nodes[nid]
+        _, outputs = self._graph_cache_view(graph, session_dir)
+        wiring = "\n".join(f"  - `{p}` ← `{d}`" for p, d in node.inputs.items()) or "  (none)"
+        params = "\n".join(f"  - `{k}` = `{v}`" for k, v in node.params.items()) or "  (none)"
+        out = (outputs or {}).get(nid, "")
+        out_block = f"\n\n**Output**\n```text\n{out[:800]}\n```" if out else ""
+        state = states.get(nid) if states else None
+        md = (
+            f"## Node `{nid}` · {node.op}\n\n**Last run:** {state or '—'}\n\n"
+            f"**Inputs**\n{wiring}\n\n**Params**\n{params}{out_block}"
+        )
+        await self._mount_and_scroll(UserCommandMessage(md))
+
+    async def _show_graph(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.graph import render
+
+        session_dir = self.agent_loop.session_logger.session_dir
+        graph, states = self._load_graph_and_states(session_dir)
+        if graph is None:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    "No workflow graph in this session yet — run with `--agent graph` and build one."
+                )
+            )
+            return
+
+        arg = cmd_args.strip()
+        if arg and arg != "all":
+            if arg not in graph.nodes:
+                await self._mount_and_scroll(
+                    UserCommandMessage(f"No node `{arg}`. Run `/graph` to list the graph.")
+                )
+                return
+            await self._show_graph_node(graph, session_dir, states, arg)
+            return
+
+        count = len(graph.nodes)
+        tree = render.to_tree(graph, states)
+        if count > self._GRAPH_NODE_CAP and arg != "all":
+            shown = "\n".join(f"- {line}" for line in tree[: self._GRAPH_NODE_CAP])
+            md = (
+                f"## Workflow graph — {count} nodes\n\n{shown}\n\n"
+                f"_… {count - self._GRAPH_NODE_CAP} more. Run `/graph all` for the full table + diagram._"
+            )
+            await self._mount_and_scroll(UserCommandMessage(md))
+            return
+
+        status, outputs = self._graph_cache_view(graph, session_dir)
+        table = render.nodes_table(graph, states=states, status=status, outputs=outputs)
+        tree_md = "\n".join(f"- {line}" for line in tree)
+        md = (
+            f"## Workflow graph — {count} nodes\n\n{tree_md}\n\n"
+            f"{table}\n\n```mermaid\n{render.to_mermaid(graph, states)}\n```"
+        )
+        await self._mount_and_scroll(UserCommandMessage(md))
+
+    async def _show_blocks(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.graph import render
+        from vibe.core.graph.blocks import registered_blocks
+        from vibe.core.paths import BLOCKS_DIR
+
+        parts = cmd_args.split()
+        blocks = registered_blocks()
+
+        if not parts:
+            sources = {
+                name: (str(BLOCKS_DIR.path / f"{name}.json") if (BLOCKS_DIR.path / f"{name}.json").exists() else "built-in")
+                for name in blocks
+            }
+            md = f"## Blocks — {len(blocks)}\n\n" + render.blocks_table(blocks, sources)
+            await self._mount_and_scroll(UserCommandMessage(md))
+            return
+
+        sub = parts[0]
+        name = parts[1] if len(parts) > 1 else None
+
+        if sub == "show" and name:
+            block = blocks.get(name)
+            if block is None:
+                await self._mount_and_scroll(UserCommandMessage(f"No block `{name}`. Run `/blocks` to list them."))
+                return
+            tree = "\n".join(f"- {line}" for line in render.to_tree(block.graph))
+            ports = ", ".join(block.input_ports) or "—"
+            params = ", ".join(block.params) or "—"
+            md = (
+                f"## Block `{name}`\n\n"
+                f"**inputs:** {ports}  ·  **params:** {params}  ·  **output:** `{block.output}`\n\n"
+                f"{tree}\n\n```mermaid\n{render.to_mermaid(block.graph)}\n```"
+            )
+            await self._mount_and_scroll(UserCommandMessage(md))
+            return
+
+        if sub == "rm" and name:
+            block_file = BLOCKS_DIR.path / f"{name}.json"
+            if not block_file.exists():
+                await self._mount_and_scroll(
+                    UserCommandMessage(f"`{name}` is not a saved block (built-in or unknown) — nothing to delete.")
+                )
+                return
+            if "--yes" not in parts:
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"Will delete `{block_file}`. Re-run `/blocks rm {name} --yes` to confirm."
+                    )
+                )
+                return
+            block_file.unlink()
+            await self._mount_and_scroll(
+                UserCommandMessage(f"Deleted `{block_file}`. (Stays registered in memory until restart.)")
+            )
+            return
+
+        await self._mount_and_scroll(
+            UserCommandMessage("Usage: `/blocks` · `/blocks show <name>` · `/blocks rm <name> --yes`")
+        )
+
     async def _show_config(self, **kwargs: Any) -> None:
         """Switch to the configuration app in the bottom panel."""
         if self._current_bottom_app == BottomApp.Config:

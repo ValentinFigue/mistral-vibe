@@ -83,6 +83,16 @@ async def test_state_persists_and_reruns_incrementally(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_persists_graph_and_report(tmp_path: Path) -> None:
+    sales, costs = write_fixtures(tmp_path)
+    await _run(_tool(), _build_demo_patch(sales, costs), _ctx(tmp_path))
+    graph_dir = tmp_path / "graph"
+    assert (graph_dir / "graph.json").exists()
+    report = (graph_dir / "report.json").read_text()
+    assert "states" in report and "brief" in report  # folded report keyed by authored ids
+
+
+@pytest.mark.asyncio
 async def test_catalog_distinguishes_inputs_from_params(tmp_path: Path) -> None:
     sales, costs = write_fixtures(tmp_path)
     tool, ctx = _tool(), _ctx(tmp_path)

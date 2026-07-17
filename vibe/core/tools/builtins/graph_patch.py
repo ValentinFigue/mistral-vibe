@@ -159,9 +159,11 @@ class GraphPatch(
         finally:
             cache.close()
 
-        # Persist the new graph to state (across turns) and disk (audit / resume).
+        # Persist the new graph to state (across turns) and disk (audit / resume), plus the
+        # folded run report (authored ids) so `/graph` can show the actual last-run states.
         self.state.graph_json = new.model_dump_json()
         (graph_dir / "graph.json").write_text(self.state.graph_json)
+        (graph_dir / "report.json").write_text(folded.model_dump_json())
 
         yield GraphPatchResult(
             applied=True,

@@ -17,6 +17,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
 from vibe.core.tools.builtins.bash import BashArgs, BashResult
 from vibe.core.tools.builtins.edit import EditArgs, EditResult
+from vibe.core.tools.builtins.graph_patch import GraphPatch, GraphPatchArgs
 from vibe.core.tools.builtins.grep import GrepArgs, GrepResult
 from vibe.core.tools.builtins.read import ReadArgs, ReadResult
 from vibe.core.tools.builtins.todo import TodoArgs, TodoResult
@@ -372,6 +373,16 @@ class AskUserQuestionResultWidget(ToolResultWidget[AskUserQuestionResult]):
         yield from self._footer()
 
 
+class GraphPatchApprovalWidget(ToolApprovalWidget[GraphPatchArgs]):
+    """Show the patch as a readable per-op diff instead of raw JSON."""
+
+    def compose(self) -> ComposeResult:
+        display = GraphPatch.format_call_display(self.args)
+        yield NoMarkupStatic(display.summary, classes="approval-description")
+        if display.content:
+            yield NoMarkupStatic(display.content, classes="approval-description")
+
+
 APPROVAL_WIDGETS: dict[str, type[ToolApprovalWidget]] = {
     "bash": BashApprovalWidget,
     "read": ReadApprovalWidget,
@@ -379,6 +390,7 @@ APPROVAL_WIDGETS: dict[str, type[ToolApprovalWidget]] = {
     "edit": EditApprovalWidget,
     "grep": GrepApprovalWidget,
     "todo": TodoApprovalWidget,
+    "graph_patch": GraphPatchApprovalWidget,
 }
 
 RESULT_WIDGETS: dict[str, type[ToolResultWidget]] = {

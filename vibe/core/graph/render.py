@@ -16,6 +16,7 @@ from rich.text import Text
 from vibe.core.graph.blocks import BlockDef, expand
 from vibe.core.graph.fingerprint import fingerprint_node
 from vibe.core.graph.model import Graph, NodeId, NodeState
+from vibe.core.graph.operators import OperatorSpec
 
 _MAX_PREVIEW = 200
 
@@ -208,6 +209,39 @@ def nodes_table(
         out = _truncate(outputs[nid]) if outputs and nid in outputs else ""
         rows.append(f"| `{nid}` | {node.op} | {wiring} | {last} | {cached} | {out} |")
     return "\n".join(rows)
+
+
+def operators_catalog(
+    operators: Mapping[str, OperatorSpec],
+    blocks: Mapping[str, BlockDef],
+    *,
+    verbose: bool = False,
+) -> str:
+    """The operator + block catalog, as markdown.
+
+    Compact (``verbose=False``, used by the agent catalog on every patch result) shows arg
+    types but no descriptions; verbose (used by ``/operators``) adds the one-line description.
+    """
+    lines = ["Available operators (inputs are wired from nodes; params are literals):"]
+    for name, spec in sorted(operators.items()):
+
+        def typed(argnames: tuple[str, ...], _spec: OperatorSpec = spec) -> str:
+            return ", ".join(f"{a}:{_spec.arg_types.get(a, '?')}" for a in argnames) or "—"
+
+        line = (
+            f"- {name}(inputs: {typed(spec.input_names)}; "
+            f"params: {typed(spec.literal_names())}) → {spec.result_type.__name__}"
+        )
+        if verbose and spec.description:
+            line += f"\n    {spec.description}"
+        lines.append(line)
+    lines.append("")
+    lines.append("Available blocks (reusable subgraphs — inputs / params):")
+    for name, block in sorted(blocks.items()):
+        ports = ", ".join(block.input_ports) or "—"
+        params = ", ".join(block.params) or "—"
+        lines.append(f"- {name}(inputs: {ports}; params: {params}) → {block.output}")
+    return "\n".join(lines)
 
 
 def blocks_table(blocks: Mapping[str, BlockDef], sources: Mapping[str, str]) -> str:

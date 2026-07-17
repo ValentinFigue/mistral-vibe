@@ -34,6 +34,19 @@ async def test_graph_command_opens_panel_and_escape_returns_to_input() -> None:
 
 
 @pytest.mark.asyncio
+async def test_operators_command_lists_catalog() -> None:
+    from vibe.cli.textual_ui.widgets.messages import UserCommandMessage
+
+    app = build_test_vibe_app(config=build_test_vibe_config())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_operators()
+        await pilot.pause(0.1)
+        msgs = app.query(UserCommandMessage)
+        assert any("Operators & blocks" in m._content for m in msgs)
+
+
+@pytest.mark.asyncio
 async def test_graph_command_no_graph_shows_message() -> None:
     app = build_test_vibe_app(config=build_test_vibe_config())
     async with app.run_test() as pilot:

@@ -2283,6 +2283,16 @@ class VibeApp(App):  # noqa: PLR0904
             UserCommandMessage("Usage: `/blocks` · `/blocks show <name>` · `/blocks rm <name> --yes`")
         )
 
+    async def _show_operators(self, cmd_args: str = "", **kwargs: Any) -> None:
+        from vibe.core.graph import render
+        from vibe.core.graph.blocks import registered_blocks
+        from vibe.core.graph.operators import registered_operators
+
+        catalog = render.operators_catalog(
+            registered_operators(), registered_blocks(), verbose=True
+        )
+        await self._mount_and_scroll(UserCommandMessage(f"## Operators & blocks\n\n{catalog}"))
+
     async def _show_config(self, **kwargs: Any) -> None:
         """Switch to the configuration app in the bottom panel."""
         if self._current_bottom_app == BottomApp.Config:

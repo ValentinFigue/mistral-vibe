@@ -13,12 +13,14 @@ serve stale results. The executor's optional ``verify_purity`` mode is the cheap
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 import inspect
-from typing import Any, get_type_hints
+from typing import Any, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel
+
+_COLLECTION_ORIGINS = (list, tuple, set, frozenset, Sequence)
 
 
 @dataclass(frozen=True)
@@ -36,12 +38,35 @@ class OperatorSpec:
     param_names: tuple[str, ...]
     result_type: type[BaseModel]
     input_names: tuple[str, ...] = ()
+    arg_types: dict[str, str] = field(default_factory=dict)  # arg name -> readable type
+    description: str = ""  # first docstring line
 
     def literal_names(self) -> tuple[str, ...]:
         return tuple(p for p in self.param_names if p not in self.input_names)
 
 
 _REGISTRY: dict[str, OperatorSpec] = {}
+
+
+def _readable_type(annotation: Any) -> str:
+    """A short, human-readable type name (``FileContent``, ``list[Row]``, ``str``)."""
+    if isinstance(annotation, type):
+        return annotation.__name__
+    origin = get_origin(annotation)
+    if origin is not None:
+        inner = ", ".join(_readable_type(a) for a in get_args(annotation))
+        return f"{getattr(origin, '__name__', str(origin))}[{inner}]" if inner else str(origin)
+    return str(annotation)
+
+
+def _is_input_annotation(annotation: Any) -> bool:
+    """True if the arg is wired from a node: a BaseModel, or a list/tuple/set/Sequence of one."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return True
+    if get_origin(annotation) in _COLLECTION_ORIGINS:
+        args = get_args(annotation)
+        return bool(args) and isinstance(args[0], type) and issubclass(args[0], BaseModel)
+    return False
 
 
 def operator(
@@ -64,13 +89,18 @@ def operator(
                 f"operator {op_name!r} must annotate a pydantic BaseModel return type"
             )
 
-        input_names = tuple(
-            p
-            for p in params
-            if isinstance(hints.get(p), type) and issubclass(hints[p], BaseModel)
-        )
+        input_names = tuple(p for p in params if _is_input_annotation(hints.get(p)))
+        arg_types = {p: _readable_type(hints[p]) for p in params if p in hints}
+        doc = (fn.__doc__ or "").strip()
+        description = doc.splitlines()[0].strip() if doc else ""
         _REGISTRY[op_name] = OperatorSpec(
-            op_name, fn, params, result_type, input_names=input_names
+            op_name,
+            fn,
+            params,
+            result_type,
+            input_names=input_names,
+            arg_types=arg_types,
+            description=description,
         )
         return fn
 

@@ -189,6 +189,11 @@ class CommandRegistry:
                 description="List saved graph blocks (/blocks show|rm <name>)",
                 handler="_show_blocks",
             ),
+            "operators": Command(
+                aliases=frozenset(["/operators"]),
+                description="List available graph operators and blocks",
+                handler="_show_operators",
+            ),
         }
 
     @property

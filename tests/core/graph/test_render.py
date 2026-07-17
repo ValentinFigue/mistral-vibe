@@ -97,6 +97,22 @@ def test_blocks_table_lists_blocks() -> None:
     assert "weekly_margin_brief" in table
 
 
+def test_operators_catalog_compact_vs_verbose() -> None:
+    from vibe.core.graph.blocks import registered_blocks
+    from vibe.core.graph.operators import registered_operators
+    from vibe.core.graph.render import operators_catalog
+
+    ops, blocks = registered_operators(), registered_blocks()
+    compact = operators_catalog(ops, blocks, verbose=False)
+    verbose = operators_catalog(ops, blocks, verbose=True)
+
+    # Types appear in both; descriptions only in verbose.
+    assert "parse_table(inputs: file:FileContent; params: amount_col:str) → Table" in compact
+    assert "region,<amount_col>" not in compact  # no description in compact
+    assert "region,<amount_col>" in verbose  # parse_table's docstring
+    assert "margin_brief" in compact  # blocks listed too
+
+
 def test_node_line_and_detail_are_markup_safe() -> None:
     from vibe.core.graph.render import node_detail, node_line
 

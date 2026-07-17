@@ -13,6 +13,7 @@ the human reviews the typed diff at the approval gate before it is applied.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import AsyncGenerator
 from typing import ClassVar
 
@@ -48,6 +49,23 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolResultEvent
 
 _MAX_OUTPUT_CHARS = 800
+_MAX_GLIMPSE_CHARS = 120
+
+
+def _op_line(op: object) -> str:
+    """A readable one-line description of a single patch op (for the approval preview)."""
+    kind = getattr(op, "kind", "?")
+    if kind == "add_node":
+        return f"+ add {op.node.id} ({op.node.op})"  # type: ignore[attr-defined]
+    if kind == "remove_node":
+        return f"− remove {op.id}"  # type: ignore[attr-defined]
+    if kind == "set_param":
+        return f"~ set {op.id}.{op.key} = {op.value!r}"  # type: ignore[attr-defined]
+    if kind == "connect":
+        return f"→ connect {op.id}.{op.port} ← {op.source}"  # type: ignore[attr-defined]
+    if kind == "disconnect":
+        return f"⊘ disconnect {op.id}.{op.port}"  # type: ignore[attr-defined]
+    return f"? {kind}"
 
 
 class GraphPatchArgs(BaseModel):
@@ -98,8 +116,14 @@ class GraphPatch(
 
     @classmethod
     def format_call_display(cls, args: GraphPatchArgs) -> ToolCallDisplay:
-        kinds = ", ".join(op.kind for op in args.patch) or "no-op"
-        return ToolCallDisplay(summary=f"Patch graph: {kinds}")
+        if not args.patch:
+            return ToolCallDisplay(summary="Graph: read catalog (empty patch)")
+        counts = Counter(op.kind for op in args.patch)
+        summary = "Patch graph: " + ", ".join(f"{n}×{kind}" for kind, n in counts.items())
+        lines = [_op_line(op) for op in args.patch]
+        if args.reset:
+            lines.insert(0, "reset (discard current graph)")
+        return ToolCallDisplay(summary=summary, content="\n".join(lines))
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -108,10 +132,13 @@ class GraphPatch(
         if not isinstance(event.result, GraphPatchResult):
             return ToolResultDisplay(success=True, message="Graph updated")
         r = event.result
-        return ToolResultDisplay(
-            success=True,
-            message=f"{len(r.fresh)} ran, {len(r.cached)} cached",
-        )
+        message = f"{len(r.fresh)} ran, {len(r.cached)} cached"
+        # Glimpse of the terminal output(s), truncated (crit #6).
+        preview = next(iter(r.outputs.values()), "")
+        if preview:
+            first_line = preview.replace("\n", " ").strip()[:_MAX_GLIMPSE_CHARS]
+            message = f"{message} · {first_line}"
+        return ToolResultDisplay(success=True, message=message)
 
     async def run(
         self, args: GraphPatchArgs, ctx: InvokeContext | None = None
@@ -197,16 +224,7 @@ class GraphPatch(
 
 
 def _render_catalog() -> str:
-    """Markdown list of available operators and blocks, injected into each result."""
-    lines = ["Available operators (inputs are wired from nodes; params are literals):"]
-    for name, spec in sorted(registered_operators().items()):
-        inputs = ", ".join(spec.input_names) or "—"
-        params = ", ".join(spec.literal_names()) or "—"
-        lines.append(f"- {name}(inputs: {inputs}; params: {params}) → {spec.result_type.__name__}")
-    lines.append("")
-    lines.append("Available blocks (reusable subgraphs — inputs / params):")
-    for name, block in sorted(registered_blocks().items()):
-        ports = ", ".join(block.input_ports)
-        params = ", ".join(block.params)
-        lines.append(f"- {name}(inputs: {ports}; params: {params})")
-    return "\n".join(lines)
+    """Compact operator + block catalog injected into each result (no descriptions)."""
+    from vibe.core.graph import render
+
+    return render.operators_catalog(registered_operators(), registered_blocks(), verbose=False)

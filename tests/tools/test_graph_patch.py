@@ -82,6 +82,52 @@ async def test_state_persists_and_reruns_incrementally(tmp_path: Path) -> None:
     assert "# Q4" in result.outputs["brief"]
 
 
+def test_format_call_display_shows_per_op_diff() -> None:
+    from vibe.core.graph.model import Connect, Disconnect, RemoveNode, SetParam
+    from vibe.core.tools.builtins.graph_patch import GraphPatch
+
+    args = GraphPatchArgs(
+        patch=[
+            AddNode(node=Node(id="r", op="format_report", params={"title": "Q3"})),
+            SetParam(id="r", key="title", value="Q4"),
+            Connect(id="r", port="margins", source="m"),
+            Disconnect(id="r", port="margins"),
+            RemoveNode(id="old"),
+        ]
+    )
+    display = GraphPatch.format_call_display(args)
+    assert "1×add_node" in display.summary
+    assert display.content is not None
+    assert "+ add r (format_report)" in display.content
+    assert "~ set r.title = 'Q4'" in display.content
+    assert "→ connect r.margins ← m" in display.content
+    assert "⊘ disconnect r.margins" in display.content
+    assert "− remove old" in display.content
+
+
+def test_graph_patch_approval_widget_registered() -> None:
+    from vibe.cli.textual_ui.widgets.tool_widgets import (
+        APPROVAL_WIDGETS,
+        GraphPatchApprovalWidget,
+    )
+
+    assert APPROVAL_WIDGETS["graph_patch"] is GraphPatchApprovalWidget
+
+
+@pytest.mark.asyncio
+async def test_result_glimpse_includes_output(tmp_path: Path) -> None:
+    from vibe.core.tools.builtins.graph_patch import GraphPatch
+    from vibe.core.types import ToolResultEvent
+
+    sales, costs = write_fixtures(tmp_path)
+    result = await _run(_tool(), _build_demo_patch(sales, costs, title="Q3"), _ctx(tmp_path))
+    display = GraphPatch.get_result_display(
+        ToolResultEvent(tool_name="graph_patch", tool_call_id="t", tool_class=GraphPatch, result=result)
+    )
+    assert "3 ran" in display.message
+    assert "# Q3" in display.message  # terminal output glimpse
+
+
 @pytest.mark.asyncio
 async def test_persists_graph_and_report(tmp_path: Path) -> None:
     sales, costs = write_fixtures(tmp_path)
@@ -98,7 +144,8 @@ async def test_catalog_distinguishes_inputs_from_params(tmp_path: Path) -> None:
     tool, ctx = _tool(), _ctx(tmp_path)
     result = await _run(tool, _build_demo_patch(sales, costs), ctx)
     # parse_table(file: FileContent, amount_col: str) -> file is an input, amount_col a param
-    assert "parse_table(inputs: file; params: amount_col)" in result.catalog
+    # Catalog now carries arg types.
+    assert "parse_table(inputs: file:FileContent; params: amount_col:str)" in result.catalog
 
 
 @pytest.mark.asyncio

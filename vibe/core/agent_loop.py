@@ -251,6 +251,25 @@ def requires_init(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+def _tool_result_text(tool_instance: BaseTool, result_model: BaseModel) -> str:
+    """The model-facing text for a tool result.
+
+    A tool may supply a compact, model-facing form via ``get_llm_content`` (e.g. handles
+    instead of full payloads); when it returns ``None`` (the default) we flatten every field
+    into ``"key: value"`` lines. ``get_result_extra`` is appended after either form. The full
+    ``result_model`` is unaffected — it still flows to the UI event and the after-tool hook.
+    """
+    llm_content = tool_instance.get_llm_content(result_model)
+    if llm_content is not None:
+        text = llm_content
+    else:
+        text = "\n".join(f"{k}: {v}" for k, v in result_model.model_dump().items())
+    extra = tool_instance.get_result_extra(result_model)
+    if extra:
+        text += "\n\n" + extra
+    return text
+
+
 class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def __init__(  # noqa: PLR0913, PLR0915
         self,
@@ -1365,10 +1384,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             raise ToolError("Tool did not yield a result")
 
         result_dict = result_model.model_dump()
-        text = "\n".join(f"{k}: {v}" for k, v in result_dict.items())
-        extra = tool_instance.get_result_extra(result_model)
-        if extra:
-            text += "\n\n" + extra
+        text = _tool_result_text(tool_instance, result_model)
 
         result_cancelled = (
             isinstance(result_model, CancellableToolResult) and result_model.cancelled

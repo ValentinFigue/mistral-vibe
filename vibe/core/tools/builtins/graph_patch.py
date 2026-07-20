@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import AsyncGenerator
+from textwrap import indent
 from typing import ClassVar
 
 from pydantic import BaseModel, Field
@@ -79,6 +80,20 @@ class GraphPatchArgs(BaseModel):
     )
 
 
+class OutputHandle(BaseModel):
+    """A content-addressed reference to a terminal node's value.
+
+    The payload lives in the cache, keyed by ``fingerprint``. ``preview`` is an excerpt of the
+    terminal value (up to ``_MAX_OUTPUT_CHARS``) so the agent can actually read its final
+    result; the context win comes from *intermediate* payloads never entering context, not from
+    starving terminals — only terminal nodes get a handle.
+    """
+
+    type: str
+    fingerprint: str
+    preview: str  # excerpt of the terminal payload (up to _MAX_OUTPUT_CHARS)
+
+
 class GraphPatchResult(BaseModel):
     applied: bool
     added: list[str] = Field(default_factory=list)
@@ -86,7 +101,8 @@ class GraphPatchResult(BaseModel):
     removed: list[str] = Field(default_factory=list)
     fresh: list[str] = Field(default_factory=list)
     cached: list[str] = Field(default_factory=list)
-    outputs: dict[str, str] = Field(default_factory=dict)
+    outputs: dict[str, str] = Field(default_factory=dict)  # terminal node -> full-ish payload (UI)
+    handles: dict[str, OutputHandle] = Field(default_factory=dict)  # terminal node -> handle (model)
     catalog: str = ""
 
 
@@ -96,6 +112,7 @@ class GraphPatchConfig(BaseToolConfig):
 
 class GraphPatchState(BaseToolState):
     graph_json: str = ""
+    catalog_shown: bool = False  # the full catalog is sent to the model once per session
 
 
 class GraphPatch(
@@ -148,6 +165,11 @@ class GraphPatch(
         except ValueError as exc:
             raise ToolError(f"graph_patch requires a session directory: {exc}") from exc
 
+        # An empty patch is the agent's explicit "re-list the catalog" request: force the
+        # full catalog back into the model-facing content on this turn (see get_llm_content).
+        if not args.patch:
+            self.state.catalog_shown = False
+
         if args.reset:
             # Start a fresh workflow — ignore any prior graph.
             current = Graph()
@@ -182,9 +204,19 @@ class GraphPatch(
             except Exception as exc:  # operator raised at runtime — surface as recoverable
                 raise ToolError(f"graph execution failed: {exc}") from exc
             folded = fold_report(report, fold)
-            outputs = self._collect_outputs(new, values, cache)
+            collected = self._collect_outputs(new, values, cache)
         finally:
             cache.close()
+
+        outputs = {nid: text[:_MAX_OUTPUT_CHARS] for nid, (_, text) in collected.items()}
+        handles = {
+            nid: OutputHandle(
+                type=value.type,
+                fingerprint=value.fingerprint,
+                preview=text.strip()[:_MAX_OUTPUT_CHARS],
+            )
+            for nid, (value, text) in collected.items()
+        }
 
         # Persist the new graph to state (across turns) and disk (audit / resume), plus the
         # folded run report (authored ids) so `/graph` can show the actual last-run states.
@@ -200,16 +232,61 @@ class GraphPatch(
             fresh=folded.fresh(),
             cached=folded.cached(),
             outputs=outputs,
+            handles=handles,
             catalog=_render_catalog(),
         )
+
+    def get_llm_content(self, result: GraphPatchResult) -> str | None:
+        """Compact, handle-oriented text for the model — not the full field dump.
+
+        The graph's payoff is that intermediate payloads live in the cache, not in context:
+        the model reasons over content-addressed handles (``ref:<fp> <Type> — <preview>``)
+        while the full tables stay out of the transcript. The heavy catalog is sent only on
+        the first turn of a session (or when the agent asks to re-list via an empty patch);
+        afterwards a one-line pointer stands in. The full result (payloads, catalog) still
+        reaches the UI and the cache untouched — this only shapes the model-facing string.
+        """
+        if not result.applied:
+            return None
+        lines: list[str] = []
+        delta = [
+            f"{label} {ids}"
+            for label, ids in (("added", result.added), ("changed", result.changed),
+                               ("removed", result.removed))
+            if ids
+        ]
+        lines.append(
+            f"applied · {len(result.fresh)} ran, {len(result.cached)} cached"
+            + ("; " + "; ".join(delta) if delta else "")
+        )
+        if result.handles:
+            lines.append(
+                "terminal outputs (ref = content-addressed cache handle; "
+                "intermediate payloads stay in the cache, out of context):"
+            )
+            for nid, h in result.handles.items():
+                lines.append(f"  {nid} → ref:{h.fingerprint[:12]} {h.type}")
+                lines.append(indent(h.preview, "    "))
+        if self.state.catalog_shown:
+            lines.append("(catalog unchanged — send an empty patch to re-list operators/blocks)")
+        else:
+            lines.append("")
+            lines.append(result.catalog)
+            self.state.catalog_shown = True
+        return "\n".join(lines)
 
     @staticmethod
     def _collect_outputs(
         graph: Graph, values: dict[NodeId, Value], cache: CacheStore
-    ) -> dict[str, str]:
-        """Rehydrate the terminal nodes' payloads (truncated) for the agent to inspect."""
+    ) -> dict[str, tuple[Value, str]]:
+        """Rehydrate each terminal node's ``(handle, decoded payload)`` for the agent.
+
+        Returns the :class:`Value` handle (type + fingerprint) alongside the full decoded
+        payload so the caller can build both the UI preview and the model-facing handle
+        without reading the cache twice.
+        """
         consumed = {dep for node in graph.nodes.values() for dep in node.inputs.values()}
-        outputs: dict[str, str] = {}
+        outputs: dict[str, tuple[Value, str]] = {}
         for nid, node in graph.nodes.items():
             if nid in consumed:
                 continue
@@ -219,7 +296,7 @@ class GraphPatch(
                 continue
             payload = cache.get(value.fingerprint)
             if payload is not None:
-                outputs[nid] = payload.decode()[:_MAX_OUTPUT_CHARS]
+                outputs[nid] = (value, payload.decode())
         return outputs
 
 

@@ -30,9 +30,12 @@ from vibe.core.graph.blocks import (
 )
 from vibe.core.graph.cache import CacheStore
 
-# Importing the demo module registers a usable operator library + the `margin_brief` block.
-# A real deployment would register its own operator library at startup instead.
+# Importing the demo modules registers a usable operator library for the agent: the
+# weekly-margin pipeline + `margin_brief` block, and the analytics / research operator kits
+# (larger, realistic workflows). A real deployment would register its own library at startup.
+import vibe.core.graph.demo.analytics  # noqa: F401
 import vibe.core.graph.demo.blocks  # noqa: F401
+import vibe.core.graph.demo.research  # noqa: F401
 from vibe.core.graph.executor import GraphValidationError, execute, validate
 from vibe.core.graph.model import Graph, NodeId, Patch, Value
 from vibe.core.graph.operators import registered_operators

@@ -404,3 +404,16 @@ class BaseTool[
         file reads).  The default returns ``None`` (no annotation).
         """
         return None
+
+    def get_llm_content(self, result: ToolResult) -> str | None:
+        """Optional replacement for the model-facing text of this tool's result.
+
+        By default the agent loop flattens *every* field of the result model into
+        ``"key: value"`` lines and sends that to the LLM. A tool that carries a large
+        structured result for the UI/cache but only needs to show the model a compact
+        summary (e.g. handles + previews instead of full payloads) overrides this to
+        return that summary; it is used *instead* of the field dump (``get_result_extra``
+        is still appended after it). Returning ``None`` keeps the default dump — so
+        this is backward-compatible for every tool that does not override it.
+        """
+        return None

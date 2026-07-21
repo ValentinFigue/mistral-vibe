@@ -30,7 +30,7 @@ datas += collect_data_files(
 # CLI startup stays light — but that hides them from PyInstaller's static import graph, so the
 # frozen binary would otherwise omit them (and matplotlib's bundled fonts/mpl-data). Collect
 # them explicitly. matplotlib runs headless (Agg) in the analysis sink operators.
-for _analysis_pkg in ("pandas", "numpy", "matplotlib"):
+for _analysis_pkg in ("pandas", "numpy", "matplotlib", "duckdb"):
     _pkg_datas, _pkg_binaries, _pkg_hidden = collect_all(_analysis_pkg)
     datas += _pkg_datas
     binaries += _pkg_binaries

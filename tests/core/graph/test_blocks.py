@@ -80,3 +80,60 @@ async def test_fold_report_collapses_block_states(tmp_path: Path) -> None:
     assert folded.states["src_costs"] == "fresh"
     assert folded.states["brief"] == "fresh"  # inner costs branch recomputed
     cache.close()
+
+
+
+# --- computed block params (templates) ---
+
+from pydantic import BaseModel
+
+from vibe.core.graph.blocks import BlockDef, BlockError, is_block, register_block
+from vibe.core.graph.model import Graph, Node
+from vibe.core.graph.operators import operator
+
+
+class _Echo(BaseModel):
+    label: str
+
+
+@operator(name="tst_echo")
+async def _echo(label: str) -> _Echo:
+    return _Echo(label=label)
+
+
+def _register_templated_block() -> None:
+    if is_block("tst_tmpl"):
+        return
+    sub = Graph()
+    sub.add(Node(id="a", op="tst_echo", params={"label": ""}))          # exposed target for `tag`
+    sub.add(Node(id="b", op="tst_echo", params={"label": "{tag}_x"}))   # template referencing `tag`
+    register_block(
+        BlockDef(name="tst_tmpl", graph=sub, params={"tag": ("a", "label")}, output="b")
+    )
+
+
+def test_template_resolves_from_block_param() -> None:
+    _register_templated_block()
+    g = Graph()
+    g.add(Node(id="blk", op="tst_tmpl", params={"tag": "rev"}))
+    expanded, _ = expand(g)
+    assert expanded.nodes["blk/b"].params["label"] == "rev_x"   # template resolved
+    assert expanded.nodes["blk/a"].params["label"] == "rev"     # exposed value verbatim
+
+
+def test_template_unknown_ref_rejected_at_registration() -> None:
+    sub = Graph()
+    sub.add(Node(id="k", op="tst_echo", params={"label": "{nope}_x"}))
+    with pytest.raises(BlockError, match="unknown param 'nope'"):
+        register_block(BlockDef(name="tst_bad_tmpl", graph=sub, params={}, output="k"))
+
+
+def test_agent_value_is_not_templated() -> None:
+    if not is_block("tst_passthru"):
+        sub = Graph()
+        sub.add(Node(id="k", op="tst_echo", params={"label": "x"}))
+        register_block(BlockDef(name="tst_passthru", graph=sub, params={"label": ("k", "label")}, output="k"))
+    g = Graph()
+    g.add(Node(id="blk", op="tst_passthru", params={"label": "{literal}"}))
+    expanded, _ = expand(g)
+    assert expanded.nodes["blk/k"].params["label"] == "{literal}"  # exposed value, not templated

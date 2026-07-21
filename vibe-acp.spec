@@ -23,7 +23,7 @@ binaries = core_builtins_deps[1] + acp_builtins_deps[1]
 # hides them from PyInstaller's static import graph — collect them (and matplotlib's fonts)
 # explicitly so the frozen binary bundles them.
 analysis_datas = []
-for _analysis_pkg in ("pandas", "numpy", "matplotlib"):
+for _analysis_pkg in ("pandas", "numpy", "matplotlib", "duckdb"):
     _pkg_datas, _pkg_binaries, _pkg_hidden = collect_all(_analysis_pkg)
     analysis_datas += _pkg_datas
     binaries += _pkg_binaries

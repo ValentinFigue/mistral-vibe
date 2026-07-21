@@ -72,12 +72,20 @@ def _readable_type(annotation: Any) -> str:
 
 
 def _is_input_annotation(annotation: Any) -> bool:
-    """True if the arg is wired from a node: a BaseModel, or a list/tuple/set/Sequence of one."""
+    """True if the arg is wired from a node: a BaseModel, a list/tuple/set/Sequence of one, or an
+    Optional of a BaseModel (``Model | None`` — an optional wired input).
+    """
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return True
-    if get_origin(annotation) in _COLLECTION_ORIGINS:
+    origin = get_origin(annotation)
+    if origin in _COLLECTION_ORIGINS:
         args = get_args(annotation)
         return bool(args) and isinstance(args[0], type) and issubclass(args[0], BaseModel)
+    if origin in {Union, types.UnionType}:  # Optional[Model] / Model | None → an optional input
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        return bool(non_none) and all(
+            isinstance(a, type) and issubclass(a, BaseModel) for a in non_none
+        )
     return False
 
 

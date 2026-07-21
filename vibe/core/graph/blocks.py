@@ -20,10 +20,11 @@ ops (nested blocks are deferred).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import os
 from pathlib import Path
 import re
+import string
 import tempfile
 
 from pydantic import BaseModel, Field
@@ -43,6 +44,33 @@ _MAX_SAFE_LITERAL_LEN = 200
 
 class BlockError(Exception):
     """A block is malformed or a graph uses a block incorrectly."""
+
+
+def _template_fields(value: object) -> list[str]:
+    """The ``{name}`` field references in a string (or list of strings), for template checks."""
+    texts = [value] if isinstance(value, str) else (value if isinstance(value, list) else [])
+    fields: list[str] = []
+    for text in texts:
+        if isinstance(text, str) and "{" in text:
+            fields += [f for _, f, _, _ in string.Formatter().parse(text) if f]
+    return fields
+
+
+def _fill_template(value: object, subst: Mapping[str, object]) -> object:
+    """Substitute ``{param}`` refs in a string (or list of strings) from ``subst`` (block params).
+    Raises :class:`BlockError` on an unknown reference; non-string values pass through.
+    """
+    def one(text: object) -> object:
+        if isinstance(text, str) and "{" in text:
+            try:
+                return text.format(**subst)
+            except (KeyError, IndexError) as exc:
+                raise BlockError(f"block template {text!r} references unknown param {exc}") from exc
+        return text
+
+    if isinstance(value, list):
+        return [one(v) for v in value]
+    return one(value)
 
 
 class BlockDef(BaseModel):
@@ -76,6 +104,19 @@ def register_block(block: BlockDef) -> None:
             raise BlockError(
                 f"block {block.name!r}: nested blocks are unsupported (inner op {node.op!r})"
             )
+    # Author-baked param templates (e.g. "{metric}_sum") may only reference declared block params.
+    declared = set(block.params)
+    exposed_targets = set(block.params.values())
+    for nid, node in inner.items():
+        for key, value in node.params.items():
+            if (nid, key) in exposed_targets:
+                continue
+            for field in _template_fields(value):
+                if field not in declared:
+                    raise BlockError(
+                        f"block {block.name!r}: template {value!r} references unknown param "
+                        f"{field!r}; declared params are {sorted(declared)}"
+                    )
     _BLOCKS[block.name] = block
 
 
@@ -319,6 +360,17 @@ def expand(graph: Graph) -> tuple[Graph, dict[NodeId, NodeId]]:
         for block_param, value in node.params.items():
             inner_id, inner_key = block.params[block_param]
             expanded.nodes[prefix + inner_id].params[inner_key] = value
+
+        # resolve author-baked templates (e.g. top_n.by = "{metric}_sum") from the supplied
+        # scalar block params — so a block can reference a derived column name without leaking it
+        # as an agent-facing param. Never touch the exposed targets (those are agent values).
+        subst = {k: v for k, v in node.params.items() if isinstance(v, (str, int, float, bool))}
+        exposed_targets = set(block.params.values())
+        for inner in block.graph.nodes.values():
+            enode = expanded.nodes[prefix + inner.id]
+            for key in list(enode.params):
+                if (inner.id, key) not in exposed_targets:
+                    enode.params[key] = _fill_template(enode.params[key], subst)
 
     return expanded, fold
 

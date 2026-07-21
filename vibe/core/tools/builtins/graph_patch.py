@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from textwrap import indent
 from typing import ClassVar
 
@@ -198,76 +199,10 @@ class GraphPatch(
         except PatchError as exc:
             raise ToolError(f"invalid patch: {exc}") from exc
 
-        # A scoped agent (config.library set) may only reference in-library ops/blocks.
-        self._enforce_library(new)
-        # Stamp content_fp = hash(path) for file-source nodes — BEFORE validate (arity),
-        # changed_nodes (diff), and state persist, so an edited file is correctly dirty.
-        self._autofill_content_fp(new)
-
-        try:
-            expanded, fold = expand(new)
-            validate(expanded)
-        except (GraphValidationError, BlockError, KeyError) as exc:
-            raise ToolError(f"patch produces an invalid graph: {exc}") from exc
-
-        delta = changed_nodes(current, new)
-
-        cache = CacheStore(graph_dir / "cache.sqlite")
-        try:
-            try:
-                values, report = await execute(expanded, cache, expand_blocks=False)
-            except Exception as exc:  # operator raised at runtime — surface as recoverable
-                raise ToolError(f"graph execution failed: {exc}") from exc
-            folded = fold_report(report, fold)
-            collected = self._collect_outputs(new, values, cache)
-        finally:
-            cache.close()
-
-        outputs = {nid: text[:_MAX_OUTPUT_CHARS] for nid, (_, text) in collected.items()}
-        handles = {
-            nid: OutputHandle(
-                type=value.type,
-                fingerprint=value.fingerprint,
-                preview=text.strip()[:_MAX_OUTPUT_CHARS],
-            )
-            for nid, (value, text) in collected.items()
-        }
-
-        # Persist the new graph to state (across turns) and disk (audit / resume), plus the
-        # folded run report (authored ids) so `/graph` can show the actual last-run states.
+        result = await build_result(new, current, graph_dir, self.config.library)
+        # Persist the (autofilled) graph to in-memory state so it resumes across turns.
         self.state.graph_json = new.model_dump_json()
-        (graph_dir / "graph.json").write_text(self.state.graph_json)
-        (graph_dir / "report.json").write_text(folded.model_dump_json())
-
-        yield GraphPatchResult(
-            applied=True,
-            added=delta["added"],
-            changed=delta["changed"],
-            removed=delta["removed"],
-            fresh=folded.fresh(),
-            cached=folded.cached(),
-            outputs=outputs,
-            handles=handles,
-            catalog=_render_catalog(self.config.library),
-        )
-
-    def _enforce_library(self, graph: Graph) -> None:
-        """A scoped agent may only reference operators/blocks tagged with its library."""
-        lib = self.config.library
-        if lib is None:
-            return
-        for nid, node in graph.nodes.items():
-            if is_block(node.op):
-                item_lib: str | None = get_block(node.op).library
-            elif is_registered(node.op):
-                item_lib = get_operator(node.op).library
-            else:
-                continue  # unknown op — let validate raise the clearer "unknown operator" error
-            if item_lib != lib:
-                raise ToolError(
-                    f"operator {node.op!r} (node {nid!r}) is not in the {lib!r} library; "
-                    "use only the operators and blocks shown in the catalog"
-                )
+        yield result
 
     @staticmethod
     def _autofill_content_fp(graph: Graph) -> None:
@@ -293,43 +228,12 @@ class GraphPatch(
                 raise ToolError(f"node {nid!r}: cannot read file {path!r}: {exc}") from exc
 
     def get_llm_content(self, result: GraphPatchResult) -> str | None:
-        """Compact, handle-oriented text for the model — not the full field dump.
-
-        The graph's payoff is that intermediate payloads live in the cache, not in context:
-        the model reasons over content-addressed handles (``ref:<fp> <Type> — <preview>``)
-        while the full tables stay out of the transcript. The heavy catalog is sent only on
-        the first turn of a session (or when the agent asks to re-list via an empty patch);
-        afterwards a one-line pointer stands in. The full result (payloads, catalog) still
-        reaches the UI and the cache untouched — this only shapes the model-facing string.
-        """
-        if not result.applied:
-            return None
-        lines: list[str] = []
-        delta = [
-            f"{label} {ids}"
-            for label, ids in (("added", result.added), ("changed", result.changed),
-                               ("removed", result.removed))
-            if ids
-        ]
-        lines.append(
-            f"applied · {len(result.fresh)} ran, {len(result.cached)} cached"
-            + ("; " + "; ".join(delta) if delta else "")
-        )
-        if result.handles:
-            lines.append(
-                "terminal outputs (ref = content-addressed cache handle; "
-                "intermediate payloads stay in the cache, out of context):"
-            )
-            for nid, h in result.handles.items():
-                lines.append(f"  {nid} → ref:{h.fingerprint[:12]} {h.type}")
-                lines.append(indent(h.preview, "    "))
-        if self.state.catalog_shown:
-            lines.append("(catalog unchanged — send an empty patch to re-list operators/blocks)")
-        else:
-            lines.append("")
-            lines.append(result.catalog)
+        """Compact, handle-oriented model text (handles + previews, catalog once per session)."""
+        show_catalog = not self.state.catalog_shown
+        text = format_llm_content(result, show_catalog=show_catalog)
+        if text is not None and show_catalog:
             self.state.catalog_shown = True
-        return "\n".join(lines)
+        return text
 
     @staticmethod
     def _collect_outputs(
@@ -370,3 +274,101 @@ def _render_catalog(library: str | None = None) -> str:
     ops = {n: s for n, s in registered_operators().items() if _visible(s.library, library)}
     blocks = {n: b for n, b in registered_blocks().items() if _visible(b.library, library)}
     return render.operators_catalog(ops, blocks, verbose=False)
+
+
+def _enforce_library(graph: Graph, library: str | None) -> None:
+    """A scoped agent may only reference operators/blocks tagged with ``library``."""
+    if library is None:
+        return
+    for nid, node in graph.nodes.items():
+        if is_block(node.op):
+            item_lib: str | None = get_block(node.op).library
+        elif is_registered(node.op):
+            item_lib = get_operator(node.op).library
+        else:
+            continue  # unknown op — let validate raise the clearer "unknown operator" error
+        if item_lib != library:
+            raise ToolError(
+                f"operator {node.op!r} (node {nid!r}) is not in the {library!r} library; "
+                "use only the operators and blocks shown in the catalog"
+            )
+
+
+async def build_result(
+    new: Graph, current: Graph, graph_dir: Path, library: str | None
+) -> GraphPatchResult:
+    """Validate + execute the authored graph incrementally and build the shared result.
+
+    Shared by ``graph_patch`` (typed patches) and ``run_pipeline`` (the DSL): enforces the
+    library scope, fingerprints file sources, diffs vs the prior graph, runs only the dirty
+    subgraph, and returns handles + fresh/cached + the scoped catalog. Persists the graph +
+    folded report to ``graph_dir`` (in-memory tool state is set by the caller).
+    """
+    _enforce_library(new, library)
+    GraphPatch._autofill_content_fp(new)
+    try:
+        expanded, fold = expand(new)
+        validate(expanded)
+    except (GraphValidationError, BlockError, KeyError) as exc:
+        raise ToolError(f"invalid graph: {exc}") from exc
+
+    delta = changed_nodes(current, new)
+    cache = CacheStore(graph_dir / "cache.sqlite")
+    try:
+        try:
+            values, report = await execute(expanded, cache, expand_blocks=False)
+        except Exception as exc:  # operator raised at runtime — surface as recoverable
+            raise ToolError(f"graph execution failed: {exc}") from exc
+        folded = fold_report(report, fold)
+        collected = GraphPatch._collect_outputs(new, values, cache)
+    finally:
+        cache.close()
+
+    outputs = {nid: text[:_MAX_OUTPUT_CHARS] for nid, (_, text) in collected.items()}
+    handles = {
+        nid: OutputHandle(
+            type=value.type, fingerprint=value.fingerprint, preview=text.strip()[:_MAX_OUTPUT_CHARS]
+        )
+        for nid, (value, text) in collected.items()
+    }
+    (graph_dir / "graph.json").write_text(new.model_dump_json())
+    (graph_dir / "report.json").write_text(folded.model_dump_json())
+    return GraphPatchResult(
+        applied=True,
+        added=delta["added"], changed=delta["changed"], removed=delta["removed"],
+        fresh=folded.fresh(), cached=folded.cached(),
+        outputs=outputs, handles=handles, catalog=_render_catalog(library),
+    )
+
+
+def format_llm_content(result: GraphPatchResult, *, show_catalog: bool) -> str | None:
+    """Compact, handle-oriented model text: a summary + terminal handles (ref + preview), with
+    the catalog included only when ``show_catalog`` (once per session). Intermediate payloads
+    stay in the cache, out of context. Shared by graph_patch and run_pipeline.
+    """
+    if not result.applied:
+        return None
+    delta = [
+        f"{label} {ids}"
+        for label, ids in (("added", result.added), ("changed", result.changed),
+                           ("removed", result.removed))
+        if ids
+    ]
+    lines = [
+        f"applied · {len(result.fresh)} ran, {len(result.cached)} cached"
+        + ("; " + "; ".join(delta) if delta else "")
+    ]
+    if result.handles:
+        lines.append(
+            "terminal outputs (ref = content-addressed cache handle; "
+            "intermediate payloads stay in the cache, out of context):"
+        )
+        for nid, h in result.handles.items():
+            lines.append(f"  {nid} → ref:{h.fingerprint[:12]} {h.type}")
+            lines.append(indent(h.preview, "    "))
+    if show_catalog:
+        lines.append("")
+        lines.append(result.catalog)
+    else:
+        lines.append("(catalog unchanged — omitted to save context)")
+    return "\n".join(lines)

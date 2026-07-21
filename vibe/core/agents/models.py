@@ -220,16 +220,16 @@ ANALYST = AgentProfile(
     agent_type=AgentType.AGENT,
     overrides={
         "enabled_tools": [
-            "graph_patch",
-            "graph_save_block",
+            "run_pipeline",
             "graph_inspect",
+            "graph_save_block",
             "ask_user_question",
         ],
         "system_prompt_id": "analyst",
-        # Scope the graph tools to the data-analysis operator library — the analyst sees and
+        # Scope the pipeline tool to the data-analysis operator library — the analyst sees and
         # may reference only that library's operators and blocks.
         "tools": {
-            "graph_patch": {"library": "analysis"},
+            "run_pipeline": {"library": "analysis"},
             "graph_save_block": {"library": "analysis"},
         },
     },

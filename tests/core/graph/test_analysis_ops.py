@@ -232,10 +232,43 @@ def test_importing_analysis_does_not_load_pandas() -> None:
     code = (
         "import sys; import vibe.core.graph.library.analysis;"
         " assert 'pandas' not in sys.modules, 'pandas loaded at import time';"
-        " assert 'matplotlib' not in sys.modules, 'matplotlib loaded at import time'"
+        " assert 'matplotlib' not in sys.modules, 'matplotlib loaded at import time';"
+        " assert 'duckdb' not in sys.modules, 'duckdb loaded at import time'"
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_sql_operator_query_join_and_sandbox() -> None:
+    t = await _sales()
+    customers = await A.sample_dataset(name="customers")
+    # single-table aggregation
+    r = await A.sql(query="SELECT country, sum(revenue) AS rev FROM t1 GROUP BY country ORDER BY rev DESC LIMIT 3", t1=t)
+    assert r.columns == ["country", "rev"] and len(r.rows) == 3
+    assert r.rows[0]["rev"] >= r.rows[-1]["rev"]  # ordered
+    # join across two wired tables
+    j = await A.sql(
+        query="SELECT s.country, c.plan, sum(s.revenue) rev FROM t1 s JOIN t2 c ON s.country=c.country GROUP BY 1,2",
+        t1=t, t2=customers,
+    )
+    assert {"country", "plan", "rev"} == set(j.columns)
+    # sandbox: no filesystem access
+    with pytest.raises(ValueError, match="sql: query failed"):
+        await A.sql(query="SELECT * FROM read_csv('/etc/passwd')", t1=t)
+
+
+@pytest.mark.asyncio
+async def test_sql_operator_is_pure_through_executor(cache: CacheStore) -> None:
+    # The sql op must round-trip losslessly so verify_purity (cache soundness) holds.
+    g = Graph()
+    g.add(Node(id="src", op="sample_dataset", params={"name": "sales"}))
+    g.add(Node(id="q", op="sql",
+               params={"query": "SELECT country, sum(revenue) AS rev FROM t1 GROUP BY country ORDER BY country"},
+               inputs={"t1": "src"}))
+    await execute(g, cache)
+    _, rep = await execute(g, cache, verify_purity=True)
+    assert rep.states["q"] == "cached"
 
 
 @pytest.mark.asyncio
@@ -319,10 +352,10 @@ async def test_all_analysis_blocks_run(cache: CacheStore) -> None:
         return g
 
     for block_id, params in (
-        ("rank_by", {"group_key": "country", "metric": "revenue",
-                     "rank_by_column": "revenue_sum", "n": 3, "title": "Rank"}),
-        ("trend_by_period", {"date_column": "date", "period": "month", "group_key": "date_month",
-                             "metric": "revenue", "sort_key": "date_month", "title": "Trend"}),
+        # rank_by/trend_by_period no longer take the derived column names — computed via templates
+        ("rank_by", {"group_key": "country", "metric": "revenue", "n": 3, "title": "Rank"}),
+        ("trend_by_period", {"date_column": "date", "period": "month", "metric": "revenue", "title": "Trend"}),
+        ("month_over_month_growth", {"date_column": "date", "metric": "revenue", "title": "MoM"}),
         ("segment_summary", {"segment": "region", "metric": "revenue", "title": "Segments"}),
         ("correlation_report", {"title": "Correlations"}),
         ("frequency_report", {"column": "region", "title": "Regions"}),

@@ -391,6 +391,29 @@ async def join(left: Table, right: Table, on: str, how: str = "inner") -> Table:
     return _from_df(merged)
 
 
+@operator(library=_LIB)
+async def sql(query: str, t1: Table, t2: Table | None = None, t3: Table | None = None) -> Table:
+    """Run a DuckDB SQL query over the wired tables — the workhorse for filter/join/group/pivot/
+    window in one step. Reference the inputs by port name: ``t1`` (the piped/primary input), and
+    ``t2``/``t3`` if you wire them (e.g. ``SELECT ... FROM t1 JOIN t2 ON ...``). Add ``ORDER BY``
+    for a stable result. Sandboxed: no file or network access (use ``read_csv`` to load data).
+    """
+    import duckdb
+
+    con = duckdb.connect(config={"enable_external_access": False})
+    try:
+        for name, tbl in (("t1", t1), ("t2", t2), ("t3", t3)):
+            if tbl is not None:
+                con.register(name, _to_df(tbl))
+        try:
+            result = con.execute(query).fetchdf()
+        except duckdb.Error as exc:
+            raise ValueError(f"sql: query failed: {exc}") from exc
+    finally:
+        con.close()
+    return _from_df(result)
+
+
 # --- aggregate / analyze -------------------------------------------------------------------
 
 
@@ -748,7 +771,8 @@ def _quick_profile() -> Graph:
 def _rank_by() -> Graph:
     g = Graph()
     g.add(Node(id="g", op="group_by", params={"keys": [], "metric": "", "aggs": ["sum"]}))
-    g.add(Node(id="t", op="top_n", params={"by": "", "n": 5}, inputs={"table": "g"}))
+    # top_n ranks by the summed metric — a derived column name resolved from the `metric` param.
+    g.add(Node(id="t", op="top_n", params={"by": "{metric}_sum", "n": 5}, inputs={"table": "g"}))
     g.add(Node(id="r", op="to_markdown", params={"max_rows": 50}, inputs={"table": "t"}))
     return g
 
@@ -756,9 +780,26 @@ def _rank_by() -> Graph:
 def _trend_by_period() -> Graph:
     g = Graph()
     g.add(Node(id="dp", op="date_part", params={"column": "", "part": "month"}))
-    g.add(Node(id="g", op="group_by", params={"keys": [], "metric": "", "aggs": ["sum"]}, inputs={"table": "dp"}))
-    g.add(Node(id="s", op="sort_rows", params={"by": "", "descending": False}, inputs={"table": "g"}))
+    # group + sort by the derived date-part column ({date_column}_{period}), resolved at expand.
+    g.add(Node(id="g", op="group_by",
+               params={"keys": ["{date_column}_{period}"], "metric": "", "aggs": ["sum"]},
+               inputs={"table": "dp"}))
+    g.add(Node(id="s", op="sort_rows", params={"by": "{date_column}_{period}", "descending": False},
+               inputs={"table": "g"}))
     g.add(Node(id="r", op="to_markdown", params={"max_rows": 100}, inputs={"table": "s"}))
+    return g
+
+
+def _month_over_month_growth() -> Graph:
+    g = Graph()
+    g.add(Node(id="dp", op="date_part", params={"column": "", "part": "month"}))
+    g.add(Node(id="g", op="group_by",
+               params={"keys": ["{date_column}_month"], "metric": "", "aggs": ["sum"]},
+               inputs={"table": "dp"}))
+    g.add(Node(id="s", op="sort_rows", params={"by": "{date_column}_month", "descending": False},
+               inputs={"table": "g"}))
+    g.add(Node(id="pc", op="pct_change", params={"column": "{metric}_sum"}, inputs={"table": "s"}))
+    g.add(Node(id="r", op="to_markdown", params={"max_rows": 100}, inputs={"table": "pc"}))
     return g
 
 
@@ -791,10 +832,10 @@ _BLOCKS = [
     ),
     BlockDef(
         name="rank_by", graph=_rank_by(), library=_LIB,
-        description="top N groups by a summed metric; rank_by_column is <metric>_sum",
+        description="top N groups by a summed metric",
         input_ports={"table": ("g", "table")},
         params={"group_key": ("g", "keys"), "metric": ("g", "metric"),
-                "rank_by_column": ("t", "by"), "n": ("t", "n"), "title": ("r", "title")},
+                "n": ("t", "n"), "title": ("r", "title")},
         output="r",
     ),
     BlockDef(
@@ -802,8 +843,14 @@ _BLOCKS = [
         description="metric summed per calendar period (time series)",
         input_ports={"table": ("dp", "table")},
         params={"date_column": ("dp", "column"), "period": ("dp", "part"),
-                "group_key": ("g", "keys"), "metric": ("g", "metric"),
-                "sort_key": ("s", "by"), "title": ("r", "title")},
+                "metric": ("g", "metric"), "title": ("r", "title")},
+        output="r",
+    ),
+    BlockDef(
+        name="month_over_month_growth", graph=_month_over_month_growth(), library=_LIB,
+        description="metric summed per month with row-over-row % change",
+        input_ports={"table": ("dp", "table")},
+        params={"date_column": ("dp", "column"), "metric": ("g", "metric"), "title": ("r", "title")},
         output="r",
     ),
     BlockDef(

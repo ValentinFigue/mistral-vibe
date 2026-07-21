@@ -20,16 +20,16 @@ class TestAnalystAgent:
 
     def test_analyst_scopes_tools_and_catalog(self) -> None:
         config = ANALYST.apply_to_config(build_test_vibe_config())
-        # Only the graph-authoring + inspect tools; no generic file/bash tools.
+        # The analyst authors via the pipeline DSL (run_pipeline), not raw graph_patch.
         assert set(config.enabled_tools) == {
-            "graph_patch",
+            "run_pipeline",
             "graph_save_block",
             "graph_inspect",
             "ask_user_question",
         }
         assert config.system_prompt_id == "analyst"
-        # graph_patch is scoped to the analysis library (the catalog + focus guard).
-        assert config.tools["graph_patch"]["library"] == "analysis"
+        # run_pipeline is scoped to the analysis library (the catalog + focus guard).
+        assert config.tools["run_pipeline"]["library"] == "analysis"
         assert config.tools["graph_save_block"]["library"] == "analysis"
 
     def test_analyst_prompt_is_data_analysis(self) -> None:
@@ -39,13 +39,13 @@ class TestAnalystAgent:
         assert "graph_inspect" in prompt
 
     def test_analyst_tools_resolve_through_manager(self) -> None:
-        # graph_inspect is auto-discovered, and the allow-list scopes to exactly the four tools.
+        # run_pipeline + graph_inspect are auto-discovered; the allow-list scopes to four tools.
         from vibe.core.tools.manager import ToolManager
 
         config = ANALYST.apply_to_config(build_test_vibe_config())
         available = set(ToolManager(lambda: config, defer_mcp=True).available_tools)
         assert available == {
-            "graph_patch",
+            "run_pipeline",
             "graph_save_block",
             "graph_inspect",
             "ask_user_question",

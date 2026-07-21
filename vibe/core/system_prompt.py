@@ -309,25 +309,26 @@ def _get_graph_catalog_section(
     tool_manager: ToolManager, config: VibeConfig, agent_manager: AgentManager
 ) -> str:
     """The workflow operator/block catalog for a graph-authoring agent, embedded in the system
-    prompt so the agent can author from turn 1 — no dedicated empty-patch round-trip to fetch it.
-    Scoped to the agent's ``graph_patch`` library, and stable within a session (cache-friendly).
+    prompt so the agent can author from turn 1 — no dedicated round-trip to fetch it. Scoped to
+    the agent's authoring-tool library, and stable within a session (cache-friendly).
 
-    Only the graph-authoring profiles get it — other agents may have ``graph_patch`` enabled but
+    Only the graph-authoring profiles get it — other agents may have these tools enabled but
     shouldn't pay the catalog's tokens on every turn.
     """
     from vibe.core.agents.models import BuiltinAgentName
 
     if agent_manager.active_profile.name not in {BuiltinAgentName.GRAPH, BuiltinAgentName.ANALYST}:
         return ""
-    if "graph_patch" not in tool_manager.available_tools:
+    # The graph agent authors via `graph_patch`; the analyst via `run_pipeline`.
+    authoring = next((t for t in ("graph_patch", "run_pipeline") if t in tool_manager.available_tools), None)
+    if authoring is None:
         return ""
     from vibe.core.tools.builtins.graph_patch import _render_catalog
 
-    library = config.tools.get("graph_patch", {}).get("library")
+    library = config.tools.get(authoring, {}).get("library")
     return (
         "# Workflow catalog\n\n"
-        "These are the operators and blocks you may reference in a `graph_patch` (they are also "
-        "returned by an empty patch if you need to re-list them):\n\n" + _render_catalog(library)
+        "These are the operators and blocks you may reference:\n\n" + _render_catalog(library)
     )
 
 

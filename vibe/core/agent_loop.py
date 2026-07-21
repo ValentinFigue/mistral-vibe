@@ -319,9 +319,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             permission_getter=self._permission_store.get_tool_permission,
         )
         self.skill_manager = SkillManager(lambda: self.config)
-        if self.agent_profile.name == BuiltinAgentName.GRAPH:
-            # Only the graph profile uses blocks — avoid a disk scan for every other agent
-            # (and every subagent). Total: never raises.
+        if self.agent_profile.name in {BuiltinAgentName.GRAPH, BuiltinAgentName.ANALYST}:
+            # Only the graph-authoring profiles use blocks — avoid a disk scan for every other
+            # agent (and every subagent). Total: never raises.
             _load_graph_blocks()
         self.message_observer = message_observer
         self._max_turns = max_turns
@@ -1976,9 +1976,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             permission_getter=self._permission_store.get_tool_permission,
         )
         self.skill_manager = SkillManager(lambda: self.config)
-        if self.agent_profile.name == BuiltinAgentName.GRAPH:
-            # Only the graph profile uses blocks — avoid a disk scan for every other agent
-            # (and every subagent). Total: never raises.
+        if self.agent_profile.name in {BuiltinAgentName.GRAPH, BuiltinAgentName.ANALYST}:
+            # Only the graph-authoring profiles use blocks — avoid a disk scan for every other
+            # agent (and every subagent). Total: never raises.
             _load_graph_blocks()
 
         new_system_prompt = get_universal_system_prompt(

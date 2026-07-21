@@ -119,6 +119,21 @@ def output_ids(graph: Graph) -> tuple[Graph, dict[NodeId, NodeId]]:
     return expanded, producing
 
 
+def materialize_node_value(graph: Graph, node_id: NodeId, cache: _CacheLike) -> str | None:
+    """The decoded cached payload (canonical JSON text) for an authored node's output.
+
+    The single fingerprint→cache-read path, shared by ``graph_inspect`` and the ``/graph``
+    panel. Block-aware via :func:`output_ids` (a block node's value is produced by its declared
+    output child). Returns ``None`` if the node is unknown or its value isn't cached yet.
+    """
+    _expanded, producing = output_ids(graph)
+    eid = producing.get(node_id)
+    if eid is None:
+        return None
+    payload = cache.get(fingerprint_node(_expanded, eid, {}))
+    return payload.decode() if payload is not None else None
+
+
 def _truncate(text: str) -> str:
     text = text.replace("\n", " ")
     return text if len(text) <= _MAX_PREVIEW else text[:_MAX_PREVIEW] + "…"
@@ -240,7 +255,10 @@ def operators_catalog(
     for name, block in sorted(blocks.items()):
         ports = ", ".join(block.input_ports) or "—"
         params = ", ".join(block.params) or "—"
-        lines.append(f"- {name}(inputs: {ports}; params: {params}) → {block.output}")
+        line = f"- {name}(inputs: {ports}; params: {params}) → {block.output}"
+        if block.description:
+            line += f"  — {block.description}"
+        lines.append(line)
     return "\n".join(lines)
 
 

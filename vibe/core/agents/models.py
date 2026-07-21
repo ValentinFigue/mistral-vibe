@@ -44,6 +44,7 @@ class BuiltinAgentName(StrEnum):
     EXPLORE = "explore"
     LEAN = "lean"
     GRAPH = "graph"
+    ANALYST = "analyst"
 
 
 @dataclass(frozen=True)
@@ -211,6 +212,29 @@ GRAPH = AgentProfile(
     },
 )
 
+ANALYST = AgentProfile(
+    name=BuiltinAgentName.ANALYST,
+    display_name="Data Analyst",
+    description="Analyze data by authoring a workflow graph (load → clean → aggregate → report)",
+    safety=AgentSafety.NEUTRAL,
+    agent_type=AgentType.AGENT,
+    overrides={
+        "enabled_tools": [
+            "graph_patch",
+            "graph_save_block",
+            "graph_inspect",
+            "ask_user_question",
+        ],
+        "system_prompt_id": "analyst",
+        # Scope the graph tools to the data-analysis operator library — the analyst sees and
+        # may reference only that library's operators and blocks.
+        "tools": {
+            "graph_patch": {"library": "analysis"},
+            "graph_save_block": {"library": "analysis"},
+        },
+    },
+)
+
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.DEFAULT: DEFAULT,
     BuiltinAgentName.PLAN: PLAN,
@@ -219,4 +243,5 @@ BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.EXPLORE: EXPLORE,
     BuiltinAgentName.LEAN: LEAN,
     BuiltinAgentName.GRAPH: GRAPH,
+    BuiltinAgentName.ANALYST: ANALYST,
 }

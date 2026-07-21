@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.graph.demo.analytics import build_analytics_graph
-from vibe.core.graph.demo.compare import measure_workflow
-from vibe.core.graph.demo.research import build_research_graph
+from vibe.core.graph.demo.compare import (
+    build_analytics_graph,
+    build_research_graph,
+    measure_workflow,
+)
 
 
 @pytest.mark.asyncio

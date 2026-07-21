@@ -40,6 +40,8 @@ class OperatorSpec:
     input_names: tuple[str, ...] = ()
     arg_types: dict[str, str] = field(default_factory=dict)  # arg name -> readable type
     description: str = ""  # first docstring line
+    library: str | None = None  # catalog-scoping tag; None = untagged (generic/kitchen-sink)
+    reads_file: str | None = None  # name of a path param whose file content is fingerprinted
 
     def literal_names(self) -> tuple[str, ...]:
         return tuple(p for p in self.param_names if p not in self.input_names)
@@ -73,8 +75,16 @@ def operator(
     func: Callable[..., Awaitable[BaseModel]] | None = None,
     *,
     name: str | None = None,
+    library: str | None = None,
+    reads_file: str | None = None,
 ) -> Any:
-    """Register an async operator. Usable as ``@operator`` or ``@operator(name=...)``."""
+    """Register an async operator. Usable as ``@operator`` or ``@operator(name=...)``.
+
+    ``library`` tags the operator for per-agent catalog scoping (``None`` = untagged, shown to
+    the generic agent). ``reads_file`` names a path param whose file content the caller should
+    fingerprint (see ``graph_patch``'s content-hash autofill); the op must also declare a
+    ``content_fp`` param.
+    """
 
     def wrap(fn: Callable[..., Awaitable[BaseModel]]) -> Callable[..., Awaitable[BaseModel]]:
         op_name = name or fn.__name__
@@ -88,6 +98,8 @@ def operator(
             raise TypeError(
                 f"operator {op_name!r} must annotate a pydantic BaseModel return type"
             )
+        if reads_file is not None and reads_file not in params:
+            raise TypeError(f"operator {op_name!r}: reads_file={reads_file!r} is not a parameter")
 
         input_names = tuple(p for p in params if _is_input_annotation(hints.get(p)))
         arg_types = {p: _readable_type(hints[p]) for p in params if p in hints}
@@ -101,6 +113,8 @@ def operator(
             input_names=input_names,
             arg_types=arg_types,
             description=description,
+            library=library,
+            reads_file=reads_file,
         )
         return fn
 

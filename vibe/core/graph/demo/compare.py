@@ -23,14 +23,16 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+import random
 import tempfile
 
 from vibe.core.graph import render
 from vibe.core.graph.cache import CacheStore
-from vibe.core.graph.demo.analytics import build_analytics_graph
-from vibe.core.graph.demo.research import build_research_graph
+from vibe.core.graph.demo.research import build_research_graph as _research_build
 from vibe.core.graph.executor import execute
-from vibe.core.graph.model import Graph, Report, Value
+from vibe.core.graph.fingerprint import content_hash
+import vibe.core.graph.library.analysis  # noqa: F401  (registers the analysis operator kit)
+from vibe.core.graph.model import Graph, Node, Report, Value
 from vibe.core.tools.builtins.graph_patch import (
     _MAX_OUTPUT_CHARS,
     GraphPatch,
@@ -46,6 +48,51 @@ from vibe.core.utils.tokens import approx_token_count
 def _tool() -> GraphPatch:
     """A GraphPatch whose only role here is to lend its real ``get_llm_content``."""
     return GraphPatch(config_getter=lambda: GraphPatchConfig(), state=GraphPatchState())
+
+
+_REGIONS = ("emea", "amer", "apac", "latam")
+_COUNTRIES = ("fr", "us", "de", "jp", "br", "in", "gb", "ca")
+_ACTIONS = ("view", "signup", "purchase", "refund")
+
+
+def _write_events_csv(work_dir: Path, n_rows: int = 2000) -> Path:
+    """Write a deterministic ~2k-row events CSV (large intermediates for the comparison)."""
+    path = work_dir / "events.csv"
+    if not path.exists():
+        rng = random.Random(7)
+        lines = ["event_id,region,country,action,amount"]
+        lines += [
+            f"{i},{rng.choice(_REGIONS)},{rng.choice(_COUNTRIES)},"
+            f"{rng.choice(_ACTIONS)},{round(rng.uniform(1.0, 500.0), 2)}"
+            for i in range(n_rows)
+        ]
+        path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def build_analytics_graph(work_dir: Path, *, key: str = "country") -> Graph:
+    """The analytics workflow on the real kit: read_csv → filter → group_by → top_n → report."""
+    path = _write_events_csv(work_dir)
+    g = Graph()
+    g.add(Node(id="events", op="read_csv",
+               params={"path": str(path), "content_fp": content_hash(path)}))
+    g.add(Node(id="filtered", op="filter_rows",
+               params={"column": "action", "op": "==", "value": "purchase"},
+               inputs={"table": "events"}))
+    g.add(Node(id="grouped", op="group_by",
+               params={"keys": [key], "metric": "amount", "aggs": ["sum", "count"]},
+               inputs={"table": "filtered"}))
+    g.add(Node(id="ranked", op="top_n", params={"by": "amount_sum", "n": 5},
+               inputs={"table": "grouped"}))
+    g.add(Node(id="report", op="to_markdown",
+               params={"title": "Top markets by purchase revenue", "max_rows": 10},
+               inputs={"table": "ranked"}))
+    return g
+
+
+def build_research_graph(work_dir: Path, *, keyword: str = "latency") -> Graph:
+    """Adapter: the research demo graph (ignores work_dir; keeps the measure_workflow signature)."""
+    return _research_build(keyword=keyword)
 
 
 def _transcript_context(graph: Graph, values: dict[str, Value], cache: CacheStore) -> str:
@@ -139,7 +186,7 @@ async def measure_workflow(
         cache = CacheStore(tmp / "cache.sqlite")
         try:
             # Cold run — both strategies compute every node.
-            graph = build_fn()
+            graph = build_fn(tmp)
             values, report = await execute(graph, cache)
             cold = TurnMetric(
                 transcript_tokens=approx_token_count(_transcript_context(graph, values, cache)),
@@ -149,7 +196,7 @@ async def measure_workflow(
             )
 
             # Re-run after editing one param — only the dirty subgraph recomputes for the graph.
-            graph2 = build_fn(**edit_kwargs)
+            graph2 = build_fn(tmp, **edit_kwargs)
             values2, report2 = await execute(graph2, cache)
             rerun = TurnMetric(
                 transcript_tokens=approx_token_count(_transcript_context(graph2, values2, cache)),

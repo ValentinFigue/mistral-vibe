@@ -237,3 +237,50 @@ async def test_invalid_patch_returns_tool_error(tmp_path: Path) -> None:
     args = GraphPatchArgs(patch=[AddNode(node=Node(id="x", op="does_not_exist"))])
     with pytest.raises(ToolError, match="invalid graph"):
         await _run(tool, args, ctx)
+
+
+@pytest.mark.asyncio
+async def test_read_csv_content_fp_autofilled_and_incremental(tmp_path: Path) -> None:
+    # The agent supplies only a path; graph_patch injects content_fp = hash(file) each turn.
+    csv = tmp_path / "d.csv"
+    csv.write_text("a,b\n1,x\n")
+    tool, ctx = _tool(), _ctx(tmp_path)
+    build = GraphPatchArgs(
+        patch=[
+            AddNode(node=Node(id="src", op="read_csv", params={"path": str(csv)})),
+            AddNode(node=Node(id="rep", op="to_markdown",
+                              params={"title": "T", "max_rows": 10}, inputs={"table": "src"})),
+        ]
+    )
+    r1 = await _run(tool, build, ctx)
+    assert set(r1.fresh) == {"src", "rep"}  # ran despite the agent omitting content_fp
+
+    r2 = await _run(tool, GraphPatchArgs(patch=[]), ctx)  # unchanged file → all cached
+    assert set(r2.cached) == {"src", "rep"} and r2.fresh == []
+
+    csv.write_text("a,b\n1,x\n2,y\n")  # edit the file
+    r3 = await _run(tool, GraphPatchArgs(patch=[]), ctx)  # re-hash → dirty rerun
+    assert set(r3.fresh) == {"src", "rep"}
+
+
+@pytest.mark.asyncio
+async def test_library_scoping_catalog_and_focus_guard(tmp_path: Path) -> None:
+    config = GraphPatchConfig(library="analysis")
+    tool = GraphPatch(config_getter=lambda: config, state=GraphPatchState())
+    ctx = _ctx(tmp_path)
+
+    # The scoped catalog shows analysis ops/blocks only — not the margin demo.
+    catalog = (await _run(tool, GraphPatchArgs(patch=[]), ctx)).catalog
+    assert "sample_dataset" in catalog and "sales_source" not in catalog
+
+    # Referencing an out-of-library (untagged margin) op is rejected.
+    with pytest.raises(ToolError, match="not in the 'analysis' library"):
+        await _run(tool, GraphPatchArgs(patch=[AddNode(node=Node(id="s", op="sales_source"))]), ctx)
+
+    # An in-library op is accepted.
+    r = await _run(
+        tool,
+        GraphPatchArgs(patch=[AddNode(node=Node(id="src", op="sample_dataset", params={"name": "sales"}))]),
+        ctx,
+    )
+    assert "src" in r.fresh

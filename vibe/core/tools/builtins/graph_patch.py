@@ -30,15 +30,16 @@ from vibe.core.graph.blocks import (
 )
 from vibe.core.graph.cache import CacheStore
 
-# Importing the demo modules registers a usable operator library for the agent: the
-# weekly-margin pipeline + `margin_brief` block, and the analytics / research operator kits
-# (larger, realistic workflows). A real deployment would register its own library at startup.
-import vibe.core.graph.demo.analytics  # noqa: F401
-import vibe.core.graph.demo.blocks  # noqa: F401
+# Registering the operator libraries the agents may use. The `analysis` library (data-analysis
+# kit) is the `analyst` profile's scoped catalog; the demo margin/research kits round out the
+# generic `graph` agent. A real deployment would register its own libraries at startup.
+import vibe.core.graph.demo.blocks  # noqa: F401  (weekly-margin pipeline + blocks)
 import vibe.core.graph.demo.research  # noqa: F401
 from vibe.core.graph.executor import GraphValidationError, execute, validate
+from vibe.core.graph.fingerprint import content_hash
+import vibe.core.graph.library.analysis  # noqa: F401  (data-analysis operator kit + blocks)
 from vibe.core.graph.model import Graph, NodeId, Patch, Value
-from vibe.core.graph.operators import registered_operators
+from vibe.core.graph.operators import get_operator, is_registered, registered_operators
 from vibe.core.graph.patch import PatchError, apply_patch, changed_nodes
 from vibe.core.graph.session_store import graph_dir as _session_graph_dir
 from vibe.core.tools.base import (
@@ -111,6 +112,10 @@ class GraphPatchResult(BaseModel):
 
 class GraphPatchConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
+    # Catalog-scoping: when set (e.g. the `analyst` profile sets "analysis"), the agent only
+    # sees — and may only reference — operators/blocks tagged with this library. None = generic
+    # agent, full catalog (unchanged behavior).
+    library: str | None = None
 
 
 class GraphPatchState(BaseToolState):
@@ -192,6 +197,13 @@ class GraphPatch(
             new = apply_patch(current, args.patch)
         except PatchError as exc:
             raise ToolError(f"invalid patch: {exc}") from exc
+
+        # A scoped agent (config.library set) may only reference in-library ops/blocks.
+        self._enforce_library(new)
+        # Stamp content_fp = hash(path) for file-source nodes — BEFORE validate (arity),
+        # changed_nodes (diff), and state persist, so an edited file is correctly dirty.
+        self._autofill_content_fp(new)
+
         try:
             expanded, fold = expand(new)
             validate(expanded)
@@ -236,8 +248,49 @@ class GraphPatch(
             cached=folded.cached(),
             outputs=outputs,
             handles=handles,
-            catalog=_render_catalog(),
+            catalog=_render_catalog(self.config.library),
         )
+
+    def _enforce_library(self, graph: Graph) -> None:
+        """A scoped agent may only reference operators/blocks tagged with its library."""
+        lib = self.config.library
+        if lib is None:
+            return
+        for nid, node in graph.nodes.items():
+            if is_block(node.op):
+                item_lib: str | None = get_block(node.op).library
+            elif is_registered(node.op):
+                item_lib = get_operator(node.op).library
+            else:
+                continue  # unknown op — let validate raise the clearer "unknown operator" error
+            if item_lib != lib:
+                raise ToolError(
+                    f"operator {node.op!r} (node {nid!r}) is not in the {lib!r} library; "
+                    "use only the operators and blocks shown in the catalog"
+                )
+
+    @staticmethod
+    def _autofill_content_fp(graph: Graph) -> None:
+        """For every file-source node, stamp ``content_fp = content_hash(path)``.
+
+        Lets the agent supply only a ``path``; the tool fingerprints the file's bytes so an
+        edited file re-fingerprints (and reruns) while an unchanged file stays a cache hit.
+        """
+        for nid, node in graph.nodes.items():
+            if is_block(node.op) or not is_registered(node.op):
+                continue
+            spec = get_operator(node.op)
+            if spec.reads_file is None:
+                continue
+            path = node.params.get(spec.reads_file)
+            if not isinstance(path, str) or not path:
+                raise ToolError(
+                    f"node {nid!r} ({node.op}) needs a '{spec.reads_file}' file path param"
+                )
+            try:
+                node.params["content_fp"] = content_hash(path)
+            except OSError as exc:
+                raise ToolError(f"node {nid!r}: cannot read file {path!r}: {exc}") from exc
 
     def get_llm_content(self, result: GraphPatchResult) -> str | None:
         """Compact, handle-oriented text for the model — not the full field dump.
@@ -303,8 +356,17 @@ class GraphPatch(
         return outputs
 
 
-def _render_catalog() -> str:
-    """Compact operator + block catalog injected into each result (no descriptions)."""
+def _visible(item_library: str | None, agent_library: str | None) -> bool:
+    """Catalog visibility: the generic agent (``None``) sees all; a scoped agent sees only
+    operators/blocks tagged with its own library (untagged items are generic-only).
+    """
+    return agent_library is None or item_library == agent_library
+
+
+def _render_catalog(library: str | None = None) -> str:
+    """Compact operator + block catalog injected into each result, scoped to ``library``."""
     from vibe.core.graph import render
 
-    return render.operators_catalog(registered_operators(), registered_blocks(), verbose=False)
+    ops = {n: s for n, s in registered_operators().items() if _visible(s.library, library)}
+    blocks = {n: b for n, b in registered_blocks().items() if _visible(b.library, library)}
+    return render.operators_catalog(ops, blocks, verbose=False)

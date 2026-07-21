@@ -53,6 +53,8 @@ class BlockDef(BaseModel):
     input_ports: dict[str, tuple[NodeId, str]] = Field(default_factory=dict)
     params: dict[str, tuple[NodeId, str]] = Field(default_factory=dict)
     output: NodeId
+    library: str | None = None  # catalog-scoping tag; None = untagged (generic agent)
+    description: str = ""  # one-line "when to use", shown in the catalog
 
 
 _BLOCKS: dict[str, BlockDef] = {}

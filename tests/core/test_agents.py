@@ -4,7 +4,52 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import BUILTIN_AGENTS, EXPLORE, AgentSafety, AgentType
+from vibe.core.agents.models import (
+    ANALYST,
+    BUILTIN_AGENTS,
+    EXPLORE,
+    AgentSafety,
+    AgentType,
+)
+
+
+class TestAnalystAgent:
+    def test_analyst_registered(self) -> None:
+        assert BUILTIN_AGENTS["analyst"] is ANALYST
+        assert ANALYST.agent_type == AgentType.AGENT
+
+    def test_analyst_scopes_tools_and_catalog(self) -> None:
+        config = ANALYST.apply_to_config(build_test_vibe_config())
+        # Only the graph-authoring + inspect tools; no generic file/bash tools.
+        assert set(config.enabled_tools) == {
+            "graph_patch",
+            "graph_save_block",
+            "graph_inspect",
+            "ask_user_question",
+        }
+        assert config.system_prompt_id == "analyst"
+        # graph_patch is scoped to the analysis library (the catalog + focus guard).
+        assert config.tools["graph_patch"]["library"] == "analysis"
+        assert config.tools["graph_save_block"]["library"] == "analysis"
+
+    def test_analyst_prompt_is_data_analysis(self) -> None:
+        config = ANALYST.apply_to_config(build_test_vibe_config())
+        prompt = config.system_prompt.lower()
+        assert "data analyst" in prompt
+        assert "graph_inspect" in prompt
+
+    def test_analyst_tools_resolve_through_manager(self) -> None:
+        # graph_inspect is auto-discovered, and the allow-list scopes to exactly the four tools.
+        from vibe.core.tools.manager import ToolManager
+
+        config = ANALYST.apply_to_config(build_test_vibe_config())
+        available = set(ToolManager(lambda: config, defer_mcp=True).available_tools)
+        assert available == {
+            "graph_patch",
+            "graph_save_block",
+            "graph_inspect",
+            "ask_user_question",
+        }
 
 
 class TestAgentProfile:

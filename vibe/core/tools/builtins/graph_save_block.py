@@ -62,6 +62,9 @@ class GraphSaveBlockResult(BaseModel):
 
 class GraphSaveBlockConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
+    # Stamped onto saved blocks so a scoped agent (e.g. `analyst`) sees the blocks it saved in
+    # its own library. None = untagged (generic agent).
+    library: str | None = None
 
 
 class GraphSaveBlock(
@@ -125,6 +128,7 @@ class GraphSaveBlock(
         except BlockError as exc:
             raise ToolError(str(exc)) from exc
 
+        block.library = self.config.library  # scope the saved block to the agent's library
         register_block(block)
         path = save_block(block, blocks_dir)
 

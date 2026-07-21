@@ -328,6 +328,10 @@ class MistralBackend:
                     if message and message.tool_calls
                     else None,
                 ),
+                # Mistral SDK (2.4.4) exposes no prompt-cache control and its UsageInfo has no
+                # cached-token field, so cached_tokens stays 0 here. We keep a stable system+tools
+                # prefix (see the graph catalog injected into the system prompt) so any future /
+                # server-side caching can hit; revisit when the API surfaces caching.
                 usage=LLMUsage(
                     prompt_tokens=response.usage.prompt_tokens or 0,
                     completion_tokens=response.usage.completion_tokens or 0,

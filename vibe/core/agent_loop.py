@@ -1704,6 +1704,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.stats.last_turn_prompt_tokens = usage.prompt_tokens
         self.stats.last_turn_completion_tokens = usage.completion_tokens
         self.stats.session_prompt_tokens += usage.prompt_tokens
+        self.stats.session_cached_tokens += usage.cached_tokens
         self.stats.session_completion_tokens += usage.completion_tokens
         self.stats.context_tokens = usage.prompt_tokens + usage.completion_tokens
         if time_seconds > 0 and usage.completion_tokens > 0:

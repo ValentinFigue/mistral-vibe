@@ -16,7 +16,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 import inspect
-from typing import Any, get_args, get_origin, get_type_hints
+import types
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel
 
@@ -42,19 +43,28 @@ class OperatorSpec:
     description: str = ""  # first docstring line
     library: str | None = None  # catalog-scoping tag; None = untagged (generic/kitchen-sink)
     reads_file: str | None = None  # name of a path param whose file content is fingerprinted
+    defaults: dict[str, Any] = field(default_factory=dict)  # params with a signature default (optional)
 
     def literal_names(self) -> tuple[str, ...]:
         return tuple(p for p in self.param_names if p not in self.input_names)
+
+    def required_names(self) -> frozenset[str]:
+        """Params that must be supplied — everything except those with a default."""
+        return frozenset(p for p in self.param_names if p not in self.defaults)
 
 
 _REGISTRY: dict[str, OperatorSpec] = {}
 
 
 def _readable_type(annotation: Any) -> str:
-    """A short, human-readable type name (``FileContent``, ``list[Row]``, ``str``)."""
+    """A short, human-readable type name (``FileContent``, ``list[Row]``, ``str``, ``list[str]|None``)."""
+    if annotation is type(None):
+        return "None"
     if isinstance(annotation, type):
         return annotation.__name__
     origin = get_origin(annotation)
+    if origin in {Union, types.UnionType}:  # X | Y → "X|Y"
+        return "|".join(_readable_type(a) for a in get_args(annotation))
     if origin is not None:
         inner = ", ".join(_readable_type(a) for a in get_args(annotation))
         return f"{getattr(origin, '__name__', str(origin))}[{inner}]" if inner else str(origin)
@@ -91,7 +101,13 @@ def operator(
         if not inspect.iscoroutinefunction(fn):
             raise TypeError(f"operator {op_name!r} must be an async function")
 
-        params = tuple(inspect.signature(fn).parameters)
+        signature = inspect.signature(fn)
+        params = tuple(signature.parameters)
+        defaults = {
+            name: p.default
+            for name, p in signature.parameters.items()
+            if p.default is not inspect.Parameter.empty
+        }
         hints = get_type_hints(fn)
         result_type = hints.get("return")
         if not (isinstance(result_type, type) and issubclass(result_type, BaseModel)):
@@ -115,6 +131,7 @@ def operator(
             description=description,
             library=library,
             reads_file=reads_file,
+            defaults=defaults,
         )
         return fn
 

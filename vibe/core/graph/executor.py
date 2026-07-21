@@ -54,11 +54,21 @@ def validate(graph: Graph) -> None:
                 raise GraphValidationError(
                     f"node {node.id!r} input {port!r} references unknown node {dep!r}"
                 )
+            # Type-aware wiring: catch feeding e.g. a Report into a table port here, at validate
+            # time, instead of as a cryptic AttributeError mid-execution. Only enforced for a
+            # plain model type (skip list[...]/unions and unknown producers — never false-reject).
+            expected = spec.arg_types.get(port, "")
+            if expected and "[" not in expected and "|" not in expected:
+                produced = get_operator(graph.nodes[dep].op).result_type.__name__
+                if produced != expected:
+                    raise GraphValidationError(
+                        f"node {node.id!r} input {port!r} expects {expected} but node {dep!r} "
+                        f"produces {produced}"
+                    )
         provided = set(node.inputs) | set(node.params)
-        required = set(spec.param_names)
-        if provided != required:
-            missing = required - provided
-            extra = provided - required
+        missing = spec.required_names() - provided
+        extra = provided - set(spec.param_names)
+        if missing or extra:
             raise GraphValidationError(
                 f"node {node.id!r} (op {node.op!r}) argument mismatch: "
                 f"missing={sorted(missing)} extra={sorted(extra)}"
@@ -97,6 +107,9 @@ async def _run_operator(
     node = graph.nodes[node_id]
     kwargs: dict[str, object] = {port: results[dep] for port, dep in node.inputs.items()}
     kwargs.update(node.params)
+    # Fill any optional params the author omitted from the operator's signature defaults.
+    for name, value in spec.defaults.items():
+        kwargs.setdefault(name, value)
     return await spec.func(**kwargs)
 
 

@@ -8,9 +8,14 @@ from vibe.core.types import AgentStats
 
 
 def format_session_usage(stats: AgentStats) -> str:
+    cached = (
+        f" ({stats.session_cached_tokens:,} cached)"
+        if stats.session_cached_tokens
+        else ""
+    )
     return (
         "Total tokens used this session: "
-        f"input={stats.session_prompt_tokens:,} "
+        f"input={stats.session_prompt_tokens:,}{cached} "
         f"output={stats.session_completion_tokens:,} "
         f"(total={stats.session_total_llm_tokens:,})"
     )

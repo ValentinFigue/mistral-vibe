@@ -47,6 +47,7 @@ class Backend(StrEnum):
 class AgentStats(BaseModel):
     steps: int = 0
     session_prompt_tokens: int = 0
+    session_cached_tokens: int = 0  # subset of prompt tokens served from prompt cache (if any)
     session_completion_tokens: int = 0
     tool_calls_agreed: int = 0
     tool_calls_rejected: int = 0
@@ -350,11 +351,13 @@ class LLMUsage(BaseModel):
     model_config = ConfigDict(frozen=True)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0  # portion of prompt_tokens served from prompt cache (0 if none/unknown)
 
     def __add__(self, other: LLMUsage) -> LLMUsage:
         return LLMUsage(
             prompt_tokens=self.prompt_tokens + other.prompt_tokens,
             completion_tokens=self.completion_tokens + other.completion_tokens,
+            cached_tokens=self.cached_tokens + other.cached_tokens,
         )
 
 

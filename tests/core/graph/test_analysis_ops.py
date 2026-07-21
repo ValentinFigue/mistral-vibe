@@ -138,6 +138,35 @@ async def test_analysis_blocks_expand_and_run(cache: CacheStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_optional_params_may_be_omitted(cache: CacheStore) -> None:
+    # O1: to_markdown omits title+max_rows; group_by omits aggs → defaults fill in, no error.
+    g = Graph()
+    g.add(Node(id="src", op="sample_dataset", params={"name": "sales"}))
+    g.add(Node(id="grp", op="group_by", params={"keys": ["country"], "metric": "revenue"},
+               inputs={"table": "src"}))
+    g.add(Node(id="rep", op="to_markdown", inputs={"table": "grp"}))
+    values, report = await execute(g, cache)
+    assert set(report.fresh()) == {"src", "grp", "rep"}
+    md = json.loads(cache.get(values["rep"].fingerprint).decode())["markdown"]
+    assert md.startswith("# Report")  # default title
+    assert "revenue_sum" in md  # default agg = sum
+
+
+@pytest.mark.asyncio
+async def test_type_mismatch_rejected_at_validate(cache: CacheStore) -> None:
+    # O2: wiring a Report into a table input is caught before execution, with a clear message.
+    from vibe.core.graph.executor import GraphValidationError
+
+    g = Graph()
+    g.add(Node(id="src", op="sample_dataset", params={"name": "sales"}))
+    g.add(Node(id="rep", op="to_markdown", inputs={"table": "src"}))
+    g.add(Node(id="bad", op="group_by", params={"keys": ["country"], "metric": "revenue"},
+               inputs={"table": "rep"}))
+    with pytest.raises(GraphValidationError, match="expects Table but node 'rep' produces Report"):
+        await execute(g, cache)
+
+
+@pytest.mark.asyncio
 async def test_shape_operators() -> None:
     t = await _sales()
     assert (await A.select_columns(t, columns=["country", "revenue"])).columns == ["country", "revenue"]

@@ -12,12 +12,12 @@ before authoring: reference only operators and blocks it lists.
 
 ## How to work
 
-0. **Read the catalog first.** On your very first turn, emit an **empty patch**
-   (`{"patch": []}`). It runs nothing and returns the `catalog` of operators and blocks you
-   may use. Only ever reference names from that catalog — never invent an operator, and
-   never pass a filesystem path you were not given. Prefer a block over wiring raw nodes
-   (e.g. the demo's `weekly_margin_brief` block builds the whole brief from a single node,
-   taking only a `title`).
+0. **Use the catalog.** The operators and blocks you may use are listed in the **Workflow
+   catalog** section of your system prompt — only ever reference names from it, never invent an
+   operator, and never pass a filesystem path you were not given (an empty patch `{"patch": []}`
+   re-lists the catalog if you need it). Prefer a block over wiring raw nodes (e.g. the demo's
+   `weekly_margin_brief` block builds the whole brief from a single node, taking only a `title`).
+   Optional params show their default (`name:type=default`) and may be omitted.
 1. **Plan the graph, then author it.** Decide the whole DAG for the goal up front and add it
    with `add_node` ops. Do not add nodes one-at-a-time from execution results — that just
    recreates a linear transcript. Author the plan, run it, then refine.

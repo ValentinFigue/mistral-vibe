@@ -54,8 +54,10 @@ def _table(columns: list[str], rows: list[dict[str, Any]]) -> Table:
     return Table(columns=cols, rows=[{c: r.get(c) for c in cols} for r in rows])
 
 
-def _cols(value: list[str] | str) -> list[str]:
-    """Accept a single column name or a list — a bare string is one column, not per-character."""
+def _cols(value: list[str] | str | None) -> list[str]:
+    """Accept a single column name, a list, or None — a bare string is one column, not chars."""
+    if value is None:
+        return []
     return [value] if isinstance(value, str) else list(value)
 
 
@@ -194,7 +196,7 @@ async def cast_column(table: Table, column: str, type: str) -> Table:
 
 
 @operator(library=_LIB)
-async def drop_missing(table: Table, columns: list[str]) -> Table:
+async def drop_missing(table: Table, columns: list[str] | None = None) -> Table:
     """Drop rows with a missing (None/blank) value in any of ``columns`` (empty → all columns)."""
     check = _cols(columns) or table.columns
     _need(table, *check)
@@ -216,7 +218,7 @@ def _compare(cell: Any, op: str, value: Any) -> bool:
 
 
 @operator(library=_LIB)
-async def filter_rows(table: Table, column: str, op: str, value: str) -> Table:
+async def filter_rows(table: Table, column: str, value: str, op: str = "==") -> Table:
     """Keep rows where ``column`` ``op`` ``value``. op ∈ ==, !=, >, >=, <, <=, contains."""
     _need(table, column)
     valid = ("==", "!=", ">", ">=", "<", "<=", "contains")
@@ -241,7 +243,7 @@ def _sorted_non_null_first(rows: list[dict[str, Any]], by: str, descending: bool
 
 
 @operator(library=_LIB)
-async def sort_rows(table: Table, by: str, descending: bool) -> Table:
+async def sort_rows(table: Table, by: str, descending: bool = False) -> Table:
     """Sort rows by a column (None always sorts last)."""
     _need(table, by)
     return _table(table.columns, _sorted_non_null_first(table.rows, by, descending))
@@ -254,7 +256,7 @@ async def limit(table: Table, n: int) -> Table:
 
 
 @operator(library=_LIB)
-async def distinct(table: Table, columns: list[str]) -> Table:
+async def distinct(table: Table, columns: list[str] | None = None) -> Table:
     """Drop duplicate rows (by ``columns``, or all columns when empty)."""
     keys = _cols(columns) or table.columns
     _need(table, *keys)
@@ -326,7 +328,7 @@ async def date_part(table: Table, column: str, part: str) -> Table:
 
 
 @operator(library=_LIB)
-async def join(left: Table, right: Table, on: str, how: str) -> Table:
+async def join(left: Table, right: Table, on: str, how: str = "inner") -> Table:
     """Join two tables on a shared column. how ∈ inner, left."""
     _need(left, on)
     _need(right, on)
@@ -371,11 +373,12 @@ def _agg(values: list[float], how: str) -> float:
 
 
 @operator(library=_LIB)
-async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str]) -> Table:
+async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str] | None = None) -> Table:
     """Group by ``keys`` (empty → overall total) and aggregate ``metric``. aggs ⊆ sum, mean, min,
-    max, count. Output columns: keys + one per agg (``count`` is a row count).
+    max, count (default ["sum"]). Output columns: keys + one per agg (``count`` is a row count).
     """
     keys = _cols(keys)
+    aggs = _cols(aggs) or ["sum"]
     _need(table, *keys)
     unknown = [a for a in aggs if a not in {*_NUMERIC_AGGS, "count"}]
     if unknown:
@@ -408,7 +411,7 @@ async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str]) 
 
 
 @operator(library=_LIB)
-async def describe(table: Table, columns: list[str]) -> Table:
+async def describe(table: Table, columns: list[str] | None = None) -> Table:
     """Summary stats (count, mean, std, min, max) per numeric column (empty → all numeric)."""
     cols = _cols(columns) or [c for c in table.columns if _column_is_numeric(table, c)]
     _need(table, *cols)
@@ -440,7 +443,7 @@ async def value_counts(table: Table, column: str) -> Table:
 
 
 @operator(library=_LIB)
-async def top_n(table: Table, by: str, n: int) -> Table:
+async def top_n(table: Table, by: str, n: int = 10) -> Table:
     """The top ``n`` rows by ``by`` (descending; None-valued rows never count as top)."""
     _need(table, by)
     ranked = _sorted_non_null_first(table.rows, by, descending=True)
@@ -451,7 +454,7 @@ async def top_n(table: Table, by: str, n: int) -> Table:
 
 
 @operator(library=_LIB)
-async def to_markdown(table: Table, title: str, max_rows: int) -> Report:
+async def to_markdown(table: Table, title: str = "Report", max_rows: int = 50) -> Report:
     """Render the table as a markdown report (first ``max_rows`` rows)."""
 
     def cell(v: Any) -> str:

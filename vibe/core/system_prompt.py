@@ -305,7 +305,33 @@ def _get_headless_section() -> str:
     )
 
 
-def get_universal_system_prompt(  # noqa: PLR0912
+def _get_graph_catalog_section(
+    tool_manager: ToolManager, config: VibeConfig, agent_manager: AgentManager
+) -> str:
+    """The workflow operator/block catalog for a graph-authoring agent, embedded in the system
+    prompt so the agent can author from turn 1 — no dedicated empty-patch round-trip to fetch it.
+    Scoped to the agent's ``graph_patch`` library, and stable within a session (cache-friendly).
+
+    Only the graph-authoring profiles get it — other agents may have ``graph_patch`` enabled but
+    shouldn't pay the catalog's tokens on every turn.
+    """
+    from vibe.core.agents.models import BuiltinAgentName
+
+    if agent_manager.active_profile.name not in {BuiltinAgentName.GRAPH, BuiltinAgentName.ANALYST}:
+        return ""
+    if "graph_patch" not in tool_manager.available_tools:
+        return ""
+    from vibe.core.tools.builtins.graph_patch import _render_catalog
+
+    library = config.tools.get("graph_patch", {}).get("library")
+    return (
+        "# Workflow catalog\n\n"
+        "These are the operators and blocks you may reference in a `graph_patch` (they are also "
+        "returned by an empty patch if you need to re-list them):\n\n" + _render_catalog(library)
+    )
+
+
+def get_universal_system_prompt(  # noqa: PLR0912, PLR0914
     tool_manager: ToolManager,
     config: VibeConfig,
     skill_manager: SkillManager,
@@ -335,6 +361,10 @@ def get_universal_system_prompt(  # noqa: PLR0912
                 tool_prompts.append(prompt)
         if tool_prompts:
             sections.append("\n---\n".join(tool_prompts))
+
+        graph_catalog = _get_graph_catalog_section(tool_manager, config, agent_manager)
+        if graph_catalog:
+            sections.append(graph_catalog)
 
         skills_section = _get_available_skills_section(skill_manager)
         if skills_section:

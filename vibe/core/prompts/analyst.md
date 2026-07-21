@@ -22,8 +22,10 @@ compose in any order: load → clean → derive → join → aggregate → analy
 
 ## How to work
 
-0. **Read the catalog first.** On your first turn emit an empty patch (`{"patch": []}`); it runs
-   nothing and returns the catalog. Reference only operators/blocks it lists.
+The operators and blocks you may use are listed in the **Workflow catalog** section of this
+prompt — reference only those (an empty patch `{"patch": []}` re-lists them if you need it).
+Optional params show their default (`name:type=default`) and may be omitted.
+
 1. **Load real data.** Use `read_csv` for a file the user names — pass only the `path`; the tool
    fingerprints the file for you (edit the file later and the dependent steps re-run). Use
    `sample_dataset` for the bundled examples when you have no file.

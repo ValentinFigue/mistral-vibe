@@ -51,6 +51,24 @@ class TestAnalystAgent:
             "ask_user_question",
         }
 
+    def test_analyst_prompt_embeds_scoped_catalog(self) -> None:
+        # The catalog is in the system prompt (no empty-patch round-trip), scoped to analysis.
+        from vibe.core.system_prompt import _get_graph_catalog_section
+        from vibe.core.tools.manager import ToolManager
+
+        base = build_test_vibe_config()
+        applied = ANALYST.apply_to_config(base)
+        tm = ToolManager(lambda: applied, defer_mcp=True)
+        am = AgentManager(lambda: base, initial_agent="analyst")
+        section = _get_graph_catalog_section(tm, applied, am)
+        assert "Workflow catalog" in section
+        assert "read_csv" in section and "quick_profile" in section
+        assert "sales_source" not in section and "fetch_docs" not in section  # out of library
+
+        # The default agent has graph_patch enabled too, but must NOT get the catalog section.
+        dm = AgentManager(lambda: base, initial_agent="default")
+        assert _get_graph_catalog_section(ToolManager(lambda: base, defer_mcp=True), base, dm) == ""
+
 
 class TestAgentProfile:
     def test_explore_agent_is_subagent(self) -> None:

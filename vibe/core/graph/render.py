@@ -241,7 +241,13 @@ def operators_catalog(
     for name, spec in sorted(operators.items()):
 
         def typed(argnames: tuple[str, ...], _spec: OperatorSpec = spec) -> str:
-            return ", ".join(f"{a}:{_spec.arg_types.get(a, '?')}" for a in argnames) or "—"
+            # Optional params (with a default) are shown as ``name:type=default`` so the agent
+            # knows it may omit them.
+            def one(a: str) -> str:
+                base = f"{a}:{_spec.arg_types.get(a, '?')}"
+                return f"{base}={_spec.defaults[a]!r}" if a in _spec.defaults else base
+
+            return ", ".join(one(a) for a in argnames) or "—"
 
         line = (
             f"- {name}(inputs: {typed(spec.input_names)}; "

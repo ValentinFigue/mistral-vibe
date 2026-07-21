@@ -19,6 +19,16 @@ for item in core_builtins_deps[2] + acp_builtins_deps[2]:
 
 binaries = core_builtins_deps[1] + acp_builtins_deps[1]
 
+# The analysis operator library imports pandas/numpy/matplotlib lazily (inside op bodies), which
+# hides them from PyInstaller's static import graph — collect them (and matplotlib's fonts)
+# explicitly so the frozen binary bundles them.
+analysis_datas = []
+for _analysis_pkg in ("pandas", "numpy", "matplotlib"):
+    _pkg_datas, _pkg_binaries, _pkg_hidden = collect_all(_analysis_pkg)
+    analysis_datas += _pkg_datas
+    binaries += _pkg_binaries
+    hidden_imports += [i for i in _pkg_hidden if isinstance(i, str)]
+
 a = Analysis(
     ['vibe/acp/entrypoint.py'],
     pathex=[],
@@ -32,7 +42,7 @@ a = Analysis(
         # This is necessary because tools are dynamically called in vibe, meaning there is no static reference to those files
         ('vibe/core/tools/builtins/*.py', 'vibe/core/tools/builtins'),
         ('vibe/acp/tools/builtins/*.py', 'vibe/acp/tools/builtins'),
-    ],
+    ] + analysis_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

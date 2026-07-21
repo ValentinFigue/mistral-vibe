@@ -26,6 +26,16 @@ datas += collect_data_files(
     "vibe.core.skills.builtins", includes=["*.py"], include_py_files=True
 )
 
+# The analysis operator library imports pandas/numpy/matplotlib *lazily* (inside op bodies) so
+# CLI startup stays light — but that hides them from PyInstaller's static import graph, so the
+# frozen binary would otherwise omit them (and matplotlib's bundled fonts/mpl-data). Collect
+# them explicitly. matplotlib runs headless (Agg) in the analysis sink operators.
+for _analysis_pkg in ("pandas", "numpy", "matplotlib"):
+    _pkg_datas, _pkg_binaries, _pkg_hidden = collect_all(_analysis_pkg)
+    datas += _pkg_datas
+    binaries += _pkg_binaries
+    hidden_imports += [i for i in _pkg_hidden if isinstance(i, str)]
+
 a = Analysis(
     ["vibe/cli/entrypoint.py"],
     pathex=[],

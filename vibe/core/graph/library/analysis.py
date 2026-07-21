@@ -1,13 +1,24 @@
 """The data-analysis operator library — the ``analyst`` agent's toolkit.
 
 One generic, composable :class:`Table` (`columns` + `rows`) flows through every operator, so
-they chain in any order: load → clean → derive → join → aggregate → analyze → report. All
-operators are tagged ``library="analysis"`` for catalog scoping, and every error names the
+they chain in any order: load → clean → derive → join → aggregate → analyze → report → export.
+All operators are tagged ``library="analysis"`` for catalog scoping, and every error names the
 offending column and lists the available ones — the agent recovers by reading the feedback.
 
+**Engine.** Aggregation, reshape, stats, window and join operators run on **pandas** (numpy
+under it), via the `_to_df`/`_from_df` bridge; the elementwise/row operators (select, filter,
+sort, cast, derive, date_part, …) stay pure-Python (already correct and cheap, and avoids
+NaN/dtype drift). pandas/matplotlib are imported **lazily inside op bodies**, never at module
+top, so importing this module for tool discovery / catalog rendering (every CLI startup) does
+not load them. The `{columns, rows}` wire format is unchanged: `_from_df` round-trips through
+JSON so cached values stay JSON-native (no numpy scalars, NaN→null, ISO dates), keeping the
+content-addressed cache, `graph_inspect`, and `verify_purity` equality all sound.
+
 Typing: `read_csv`/`sample_dataset` infer a column numeric iff every non-empty cell parses
-(int, else float); `cast_column` overrides; aggregations raise on a non-numeric metric rather
-than coercing silently.
+(int, else float) and keep zero-padded ids as strings; `cast_column` overrides; aggregations
+raise on a non-numeric metric rather than coercing silently. `join` is a real merge (duplicate
+keys multiply). Sink operators (`to_csv`, `bar_chart`, `line_chart`) write a file and return a
+small handle, keeping bytes out of context.
 """
 
 from __future__ import annotations
@@ -17,7 +28,6 @@ from datetime import date, datetime
 import importlib.resources
 from io import StringIO
 from pathlib import Path
-import statistics
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -43,6 +53,21 @@ class Table(BaseModel):
 
 class Report(BaseModel):
     markdown: str
+
+
+class ExportResult(BaseModel):
+    """A handle to a written CSV — the file is on disk; the value stays tiny (out of context)."""
+
+    path: str
+    rows: int
+    columns: list[str]
+
+
+class ChartResult(BaseModel):
+    """A handle to a written chart image — the PNG is on disk, never inlined into context."""
+
+    path: str
+    kind: str
 
 
 # --- invariant + error helpers -------------------------------------------------------------
@@ -81,6 +106,30 @@ def _require_numeric(table: Table, column: str, op: str) -> None:
         raise ValueError(
             f"{op}: column {column!r} is not numeric; cast_column it to int/float first"
         )
+
+
+# --- pandas bridge -------------------------------------------------------------------------
+# pandas/numpy back the aggregation, reshape, stats and window operators. They are imported
+# *lazily* here (never at module top) so that importing this module for tool discovery / catalog
+# rendering — which happens on every vibe startup — does not load pandas. The `{columns, rows}`
+# wire format is unchanged: `_from_df` round-trips through JSON so values stay JSON-native
+# (no numpy scalars, NaN→null, ISO dates), which keeps the cache, graph_inspect, and
+# verify_purity equality all working.
+
+
+def _to_df(table: Table):  # noqa: ANN202 (pandas.DataFrame, imported lazily)
+    import pandas as pd
+
+    return pd.DataFrame(table.rows, columns=table.columns)
+
+
+def _from_df(df) -> Table:  # noqa: ANN001
+    import json
+
+    frame = df.copy()
+    frame.columns = [str(c) for c in frame.columns]
+    rows = json.loads(frame.to_json(orient="records", date_format="iso"))
+    return Table(columns=list(frame.columns), rows=rows)
 
 
 # --- CSV parsing + type inference ----------------------------------------------------------
@@ -329,54 +378,32 @@ async def date_part(table: Table, column: str, part: str) -> Table:
 
 @operator(library=_LIB)
 async def join(left: Table, right: Table, on: str, how: str = "inner") -> Table:
-    """Join two tables on a shared column. how ∈ inner, left."""
+    """Join two tables on a shared column (a real SQL join via pandas). how ∈ inner, left.
+
+    Unlike a lookup, duplicate keys on either side multiply matching rows (standard join
+    semantics). Overlapping non-key columns from the right are suffixed ``_right``.
+    """
     _need(left, on)
     _need(right, on)
     if how not in {"inner", "left"}:
         raise ValueError(f"join: how must be inner/left, got {how!r}")
-    right_cols = [c for c in right.columns if c != on]
-    # This is a lookup join (one right row per key), not a many-to-many join. Duplicate keys on
-    # the right would silently drop matches, so reject them with an actionable error.
-    right_keys = [r[on] for r in right.rows]
-    if len(set(right_keys)) != len(right_keys):
-        raise ValueError(
-            f"join: right table has duplicate {on!r} values; deduplicate it first "
-            "(e.g. distinct or group_by) so each key maps to one row"
-        )
-    index: dict[Any, dict[str, Any]] = {r[on]: r for r in right.rows}
-    out_cols = left.columns + [c for c in right_cols if c not in left.columns]
-    rows: list[dict[str, Any]] = []
-    for lr in left.rows:
-        match = index.get(lr[on])
-        if match is None:
-            if how == "inner":
-                continue
-            rows.append({**lr, **{c: None for c in right_cols}})
-        else:
-            rows.append({**lr, **{c: match[c] for c in right_cols}})
-    return _table(out_cols, rows)
+    merged = _to_df(left).merge(_to_df(right), on=on, how=how, suffixes=("", "_right"))
+    return _from_df(merged)
 
 
 # --- aggregate / analyze -------------------------------------------------------------------
-
-
-def _agg(values: list[float], how: str) -> float:
-    if how == "sum":
-        return sum(values)
-    if how == "mean":
-        return statistics.fmean(values) if values else 0.0
-    if how == "min":
-        return min(values)
-    if how == "max":
-        return max(values)
-    raise ValueError(f"unknown aggregation {how!r}")
 
 
 @operator(library=_LIB)
 async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str] | None = None) -> Table:
     """Group by ``keys`` (empty → overall total) and aggregate ``metric``. aggs ⊆ sum, mean, min,
     max, count (default ["sum"]). Output columns: keys + one per agg (``count`` is a row count).
+
+    Grouping is done with pandas; the output schema (``count`` int, ``{metric}_{agg}`` rounded to
+    4) is a stable contract the analysis blocks rely on.
     """
+    import pandas as pd
+
     keys = _cols(keys)
     aggs = _cols(aggs) or ["sum"]
     _need(table, *keys)
@@ -387,48 +414,53 @@ async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str] |
     if numeric:
         _require_numeric(table, metric, "group_by")
 
-    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
-    order: list[tuple[Any, ...]] = []
-    for r in table.rows:
-        sig = tuple(r[k] for k in keys)
-        if sig not in groups:
-            groups[sig] = []
-            order.append(sig)
-        groups[sig].append(r)
+    df = _to_df(table)
+
+    def agg_row(sub: Any) -> dict[str, Any]:
+        row: dict[str, Any] = {}
+        if "count" in aggs:
+            row["count"] = int(len(sub))
+        series = pd.to_numeric(sub[metric], errors="coerce").dropna() if numeric else None
+        for a in numeric:
+            row[f"{metric}_{a}"] = round(float(getattr(series, a)()), 4) if len(series) else None
+        return row
+
+    out_rows: list[dict[str, Any]] = []
+    if keys:
+        for key_vals, sub in df.groupby(keys, dropna=False, sort=False):
+            key_tuple = key_vals if isinstance(key_vals, tuple) else (key_vals,)
+            row = {k: (None if pd.isna(v) else v) for k, v in zip(keys, key_tuple, strict=True)}
+            row.update(agg_row(sub))
+            out_rows.append(row)
+    else:
+        out_rows.append(agg_row(df))
 
     out_cols = [*keys, *(("count",) if "count" in aggs else ()), *(f"{metric}_{a}" for a in numeric)]
-    rows: list[dict[str, Any]] = []
-    for sig in order:
-        members = groups[sig]
-        row = dict(zip(keys, sig, strict=True))
-        if "count" in aggs:
-            row["count"] = len(members)
-        vals = [m[metric] for m in members if m[metric] is not None]
-        for a in numeric:
-            row[f"{metric}_{a}"] = round(_agg([float(v) for v in vals], a), 4) if vals else None
-        rows.append(row)
-    return _table(out_cols, rows)
+    return _from_df(pd.DataFrame(out_rows, columns=out_cols))
 
 
 @operator(library=_LIB)
 async def describe(table: Table, columns: list[str] | None = None) -> Table:
     """Summary stats (count, mean, std, min, max) per numeric column (empty → all numeric)."""
+    import pandas as pd
+
     cols = _cols(columns) or [c for c in table.columns if _column_is_numeric(table, c)]
     _need(table, *cols)
+    df = _to_df(table)
     out_cols = ["column", "count", "mean", "std", "min", "max"]
     rows: list[dict[str, Any]] = []
     for c in cols:
         _require_numeric(table, c, "describe")
-        vals = [float(r[c]) for r in table.rows if r[c] is not None]
+        s = pd.to_numeric(df[c], errors="coerce").dropna()
         rows.append({
             "column": c,
-            "count": len(vals),
-            "mean": round(statistics.fmean(vals), 4) if vals else None,
-            "std": round(statistics.stdev(vals), 4) if len(vals) > 1 else 0.0,
-            "min": min(vals) if vals else None,
-            "max": max(vals) if vals else None,
+            "count": int(s.count()),
+            "mean": round(float(s.mean()), 4) if len(s) else None,
+            "std": round(float(s.std(ddof=1)), 4) if len(s) > 1 else 0.0,
+            "min": float(s.min()) if len(s) else None,
+            "max": float(s.max()) if len(s) else None,
         })
-    return _table(out_cols, rows)
+    return _from_df(pd.DataFrame(rows, columns=out_cols))
 
 
 @operator(library=_LIB)
@@ -448,6 +480,235 @@ async def top_n(table: Table, by: str, n: int = 10) -> Table:
     _need(table, by)
     ranked = _sorted_non_null_first(table.rows, by, descending=True)
     return _table(table.columns, ranked[: max(0, n)])
+
+
+# --- reshape / window / stats (pandas-backed) ----------------------------------------------
+
+
+@operator(library=_LIB)
+async def pivot(table: Table, index: str, columns: str, values: str, aggfunc: str = "sum") -> Table:
+    """Long→wide: one row per ``index``, one column per distinct ``columns`` value, cells are
+    ``aggfunc`` of ``values``. aggfunc ∈ sum, mean, min, max, count.
+    """
+    import pandas as pd
+
+    _need(table, index, columns, values)
+    if aggfunc not in {*_NUMERIC_AGGS, "count"}:
+        raise ValueError(f"pivot: aggfunc must be sum/mean/min/max/count, got {aggfunc!r}")
+    pt = pd.pivot_table(
+        _to_df(table), index=index, columns=columns, values=values, aggfunc=aggfunc, observed=True
+    ).round(4)
+    pt.columns = [str(c) for c in pt.columns]
+    return _from_df(pt.reset_index())
+
+
+@operator(library=_LIB)
+async def melt(
+    table: Table, id_vars: list[str], value_vars: list[str] | None = None,
+    var_name: str = "variable", value_name: str = "value",
+) -> Table:
+    """Wide→long: keep ``id_vars``, unpivot the rest (or ``value_vars``) into var/value columns."""
+    ids = _cols(id_vars)
+    vals = _cols(value_vars) or None
+    _need(table, *ids, *(vals or []))
+    return _from_df(
+        _to_df(table).melt(id_vars=ids, value_vars=vals, var_name=var_name, value_name=value_name)
+    )
+
+
+@operator(library=_LIB)
+async def concat(top: Table, bottom: Table) -> Table:
+    """Stack two tables' rows (union). Columns are the union; missing cells become null."""
+    import pandas as pd
+
+    return _from_df(pd.concat([_to_df(top), _to_df(bottom)], ignore_index=True))
+
+
+@operator(library=_LIB)
+async def fill_missing(table: Table, column: str, method: str = "value", value: Any = None) -> Table:
+    """Fill missing values in ``column``. method ∈ value, mean, median, ffill, bfill."""
+    import pandas as pd
+
+    _need(table, column)
+    if method not in {"value", "mean", "median", "ffill", "bfill"}:
+        raise ValueError(f"fill_missing: method must be value/mean/median/ffill/bfill, got {method!r}")
+    if method == "value" and value is None:
+        raise ValueError("fill_missing: method='value' needs a `value` (or use mean/median/ffill/bfill)")
+    df = _to_df(table)
+    if method == "value":
+        df[column] = df[column].fillna(value)
+    elif method in {"mean", "median"}:
+        num = pd.to_numeric(df[column], errors="coerce")
+        df[column] = num.fillna(getattr(num, method)())
+    else:
+        df[column] = df[column].ffill() if method == "ffill" else df[column].bfill()
+    return _from_df(df)
+
+
+@operator(library=_LIB)
+async def rank(table: Table, by: str, name: str = "rank", descending: bool = True, method: str = "dense") -> Table:
+    """Add a ``name`` column ranking rows by ``by`` (1 = top). method ∈ dense, min, first, average."""
+    import pandas as pd
+
+    _require_numeric(table, by, "rank")
+    if method not in {"dense", "min", "first", "average"}:
+        raise ValueError(f"rank: method must be dense/min/first/average, got {method!r}")
+    df = _to_df(table)
+    ranks = pd.to_numeric(df[by], errors="coerce").rank(ascending=not descending, method=method)
+    df[name] = ranks.astype("Int64")
+    return _from_df(df)
+
+
+@operator(name="bin", library=_LIB)
+async def bin_column(table: Table, column: str, bins: int = 4, name: str | None = None) -> Table:
+    """Bucket a numeric ``column`` into ``bins`` equal-width bins; adds a label column."""
+    import pandas as pd
+
+    _require_numeric(table, column, "bin")
+    df = _to_df(table)
+    out = name or f"{column}_bin"
+    df[out] = pd.cut(pd.to_numeric(df[column], errors="coerce"), bins=bins).astype("str")
+    return _from_df(df)
+
+
+@operator(library=_LIB)
+async def correlation(table: Table, columns: list[str] | None = None) -> Table:
+    """Pearson correlation matrix over numeric columns (a ``column`` label col + one col each)."""
+    import pandas as pd
+
+    cols = _cols(columns) or [c for c in table.columns if _column_is_numeric(table, c)]
+    _need(table, *cols)
+    for c in cols:
+        _require_numeric(table, c, "correlation")
+    num = _to_df(table)[cols].apply(pd.to_numeric, errors="coerce")
+    return _from_df(num.corr().round(4).reset_index(names="column"))
+
+
+@operator(library=_LIB)
+async def pct_change(table: Table, column: str, name: str | None = None) -> Table:
+    """Row-over-row percent change of a numeric ``column`` (adds ``{column}_pct_change``)."""
+    import pandas as pd
+
+    _require_numeric(table, column, "pct_change")
+    df = _to_df(table)
+    out = name or f"{column}_pct_change"
+    df[out] = (pd.to_numeric(df[column], errors="coerce").pct_change() * 100).round(4)
+    return _from_df(df)
+
+
+@operator(library=_LIB)
+async def rolling(table: Table, column: str, window: int, name: str | None = None, stat: str = "mean") -> Table:
+    """Rolling-window ``stat`` over a numeric ``column`` (adds ``{column}_rolling_{stat}``).
+    stat ∈ mean, sum, min, max.
+    """
+    import pandas as pd
+
+    _require_numeric(table, column, "rolling")
+    if stat not in {"mean", "sum", "min", "max"}:
+        raise ValueError(f"rolling: stat must be mean/sum/min/max, got {stat!r}")
+    df = _to_df(table)
+    out = name or f"{column}_rolling_{stat}"
+    windowed = pd.to_numeric(df[column], errors="coerce").rolling(window)
+    df[out] = getattr(windowed, stat)().round(4)
+    return _from_df(df)
+
+
+# --- data-quality gates --------------------------------------------------------------------
+
+
+@operator(library=_LIB)
+async def expect_columns(table: Table, columns: list[str]) -> Table:
+    """Assert the table has the named columns; pass it through unchanged, else fail with a
+    clear error the agent can act on.
+    """
+    missing = [c for c in _cols(columns) if c not in table.columns]
+    if missing:
+        raise ValueError(f"expect_columns: missing {missing}; available columns are {table.columns}")
+    return table
+
+
+@operator(library=_LIB)
+async def expect_no_nulls(table: Table, columns: list[str] | None = None) -> Table:
+    """Assert no missing (None/blank) values in ``columns`` (or all); pass through unchanged."""
+    check = _cols(columns) or table.columns
+    _need(table, *check)
+    for c in check:
+        bad = sum(1 for r in table.rows if r[c] is None or r[c] == "")
+        if bad:
+            raise ValueError(f"expect_no_nulls: column {c!r} has {bad} missing value(s)")
+    return table
+
+
+@operator(library=_LIB)
+async def expect_unique(table: Table, columns: list[str]) -> Table:
+    """Assert the given columns form a unique key; pass through unchanged."""
+    keys = _cols(columns)
+    _need(table, *keys)
+    seen: set[tuple[Any, ...]] = set()
+    dups = 0
+    for r in table.rows:
+        sig = tuple(r[c] for c in keys)
+        dups += sig in seen
+        seen.add(sig)
+    if dups:
+        raise ValueError(f"expect_unique: {keys} is not unique ({dups} duplicate row(s))")
+    return table
+
+
+# --- sinks (write a file, return a small handle) -------------------------------------------
+
+
+@operator(library=_LIB)
+async def to_csv(table: Table, path: str) -> ExportResult:
+    """Write the table to a CSV file at ``path``; returns a handle (path + shape), not the data.
+
+    The write is reviewed at the graph_patch approval gate (the path shows in the diff). Cached by
+    recipe — a re-run with the same inputs won't rewrite, and deleting the file won't regenerate
+    it under a cache hit.
+    """
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _to_df(table).to_csv(p, index=False)
+    return ExportResult(path=str(p), rows=len(table.rows), columns=list(table.columns))
+
+
+async def _save_chart(kind: str, table: Table, x: str, y: str, path: str, title: str) -> ChartResult:
+    import matplotlib
+
+    matplotlib.use("Agg")  # headless, deterministic; no display backend
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    _need(table, x, y)
+    df = _to_df(table)
+    ys = pd.to_numeric(df[y], errors="coerce")
+    xs = df[x].astype("str")
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
+    try:
+        (ax.bar if kind == "bar" else ax.plot)(xs, ys)
+        ax.set_title(title)
+        ax.set_xlabel(x)
+        ax.set_ylabel(y)
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        p = Path(path).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(p)
+    finally:
+        plt.close(fig)
+    return ChartResult(path=str(p), kind=kind)
+
+
+@operator(library=_LIB)
+async def bar_chart(table: Table, x: str, y: str, path: str, title: str = "Chart") -> ChartResult:
+    """Render a bar chart (``x`` categories, numeric ``y``) to a PNG at ``path``; returns a handle."""
+    return await _save_chart("bar", table, x, y, path, title)
+
+
+@operator(library=_LIB)
+async def line_chart(table: Table, x: str, y: str, path: str, title: str = "Chart") -> ChartResult:
+    """Render a line chart (``x`` vs numeric ``y``) to a PNG at ``path``; returns a handle."""
+    return await _save_chart("line", table, x, y, path, title)
 
 
 # --- report --------------------------------------------------------------------------------
@@ -508,6 +769,20 @@ def _segment_summary() -> Graph:
     return g
 
 
+def _correlation_report() -> Graph:
+    g = Graph()
+    g.add(Node(id="c", op="correlation", params={"columns": []}))
+    g.add(Node(id="r", op="to_markdown", params={"max_rows": 50}, inputs={"table": "c"}))
+    return g
+
+
+def _frequency_report() -> Graph:
+    g = Graph()
+    g.add(Node(id="v", op="value_counts", params={"column": ""}))
+    g.add(Node(id="r", op="to_markdown", params={"max_rows": 50}, inputs={"table": "v"}))
+    return g
+
+
 _BLOCKS = [
     BlockDef(
         name="quick_profile", graph=_quick_profile(), library=_LIB,
@@ -537,6 +812,17 @@ _BLOCKS = [
         input_ports={"table": ("g", "table")},
         params={"segment": ("g", "keys"), "metric": ("g", "metric"), "title": ("r", "title")},
         output="r",
+    ),
+    BlockDef(
+        name="correlation_report", graph=_correlation_report(), library=_LIB,
+        description="Pearson correlation matrix over the numeric columns, as a report",
+        input_ports={"table": ("c", "table")}, params={"title": ("r", "title")}, output="r",
+    ),
+    BlockDef(
+        name="frequency_report", graph=_frequency_report(), library=_LIB,
+        description="value counts of a column (most frequent first), as a report",
+        input_ports={"table": ("v", "table")},
+        params={"column": ("v", "column"), "title": ("r", "title")}, output="r",
     ),
 ]
 

@@ -212,12 +212,102 @@ async def test_read_csv_keeps_zero_padded_ids(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_join_rejects_duplicate_right_keys() -> None:
-    # Regression (temper #3): a non-unique right table would silently drop matches.
+async def test_join_is_a_real_merge_multiplying_dup_keys() -> None:
+    # pandas merge: duplicate keys on the right multiply matching rows (standard SQL semantics),
+    # rather than the old lookup that silently dropped matches.
     left = A.Table(columns=["country", "x"], rows=[{"country": "fr", "x": 1}])
     dup = A.Table(columns=["country", "y"], rows=[{"country": "fr", "y": 1}, {"country": "fr", "y": 2}])
-    with pytest.raises(ValueError, match="duplicate 'country' values"):
-        await A.join(left, dup, on="country", how="left")
+    out = await A.join(left, dup, on="country", how="left")
+    assert out.columns == ["country", "x", "y"]
+    assert sorted(r["y"] for r in out.rows) == [1, 2]
+    assert all(r["x"] == 1 for r in out.rows)  # left row duplicated across both matches
+
+
+def test_importing_analysis_does_not_load_pandas() -> None:
+    # crit #1: graph_patch imports this module at tool discovery (every startup); pandas must be
+    # imported lazily inside op bodies, not at module load, so the CLI startup stays lean.
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import vibe.core.graph.library.analysis;"
+        " assert 'pandas' not in sys.modules, 'pandas loaded at import time';"
+        " assert 'matplotlib' not in sys.modules, 'matplotlib loaded at import time'"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_df_bridge_round_trips_json_native(cache: CacheStore) -> None:
+    # The pandas bridge must produce JSON-native, NaN→None values so the cache round-trip +
+    # verify_purity equality hold (crit #2).
+    t = A.Table(
+        columns=["i", "f", "s", "u"],
+        rows=[{"i": 1, "f": 1.5, "s": "x", "u": "café"}, {"i": 2, "f": None, "s": "y", "u": "β"}],
+    )
+    back = A._from_df(A._to_df(t))
+    assert back.rows[0]["i"] == 1 and isinstance(back.rows[0]["i"], int)  # int stays int
+    assert back.rows[1]["f"] is None  # NaN → None
+    assert back.rows[0]["u"] == "café"
+    # idempotent (verify_purity compares model_dump across a rebuild)
+    assert A._from_df(A._to_df(back)).model_dump() == back.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_new_pandas_ops() -> None:
+    t = await _sales()
+    piv = await A.pivot(t, index="region", columns="product", values="revenue", aggfunc="sum")
+    assert piv.columns[0] == "region" and len(piv.columns) > 1
+    corr = await A.correlation(t, columns=["units", "revenue"])
+    assert corr.rows[0]["column"] == "units" and corr.rows[0]["units"] == 1.0
+    ranked = await A.rank(t, by="revenue", name="rk")
+    assert "rk" in ranked.columns and min(r["rk"] for r in ranked.rows) == 1
+    binned = await A.bin_column(t, column="revenue", bins=3)
+    assert "revenue_bin" in binned.columns
+    ml = await A.melt(t, id_vars=["region"], value_vars=["revenue", "cost"])
+    assert ml.columns == ["region", "variable", "value"] and len(ml.rows) == 2 * len(t.rows)
+    filled = await A.fill_missing(
+        A.Table(columns=["x"], rows=[{"x": 1}, {"x": None}, {"x": 3}]), column="x", method="mean"
+    )
+    assert [r["x"] for r in filled.rows] == [1.0, 2.0, 3.0]
+    doubled = await A.concat(t, t)
+    assert len(doubled.rows) == 2 * len(t.rows)
+    seq = A.Table(columns=["v"], rows=[{"v": 10}, {"v": 20}, {"v": 40}])
+    pc = await A.pct_change(seq, column="v")
+    assert pc.rows[0]["v_pct_change"] is None and pc.rows[1]["v_pct_change"] == 100.0
+    roll = await A.rolling(seq, column="v", window=2, stat="mean")
+    assert roll.rows[1]["v_rolling_mean"] == 15.0
+
+
+@pytest.mark.asyncio
+async def test_data_quality_gates() -> None:
+    t = await _sales()
+    assert (await A.expect_columns(t, columns=["region", "revenue"])).columns == t.columns
+    with pytest.raises(ValueError, match="expect_columns: missing"):
+        await A.expect_columns(t, columns=["nope"])
+    with pytest.raises(ValueError, match="not unique"):
+        await A.expect_unique(t, columns=["product"])
+    holed = A.Table(columns=["a"], rows=[{"a": 1}, {"a": None}])
+    with pytest.raises(ValueError, match="missing value"):
+        await A.expect_no_nulls(holed, columns=["a"])
+
+
+@pytest.mark.asyncio
+async def test_sink_ops_write_file_and_return_handle(tmp_path) -> None:
+    t = await _sales()
+    csv_path = tmp_path / "out.csv"
+    exp = await A.to_csv(t, path=str(csv_path))
+    assert csv_path.exists() and exp.rows == len(t.rows) and "region" in exp.columns
+    ranked = await A.group_by(t, keys=["country"], metric="revenue", aggs=["sum"])
+    png = tmp_path / "chart.png"
+    chart = await A.bar_chart(ranked, x="country", y="revenue_sum", path=str(png), title="Top")
+    assert png.exists() and png.stat().st_size > 0 and chart.kind == "bar"
+    # the value stays a tiny handle, not the image bytes
+    assert set(chart.model_dump()) == {"path", "kind"}
+    line_png = tmp_path / "line.png"
+    line = await A.line_chart(ranked, x="country", y="revenue_sum", path=str(line_png), title="Trend")
+    assert line_png.exists() and line.kind == "line"
 
 
 @pytest.mark.asyncio
@@ -234,6 +324,8 @@ async def test_all_analysis_blocks_run(cache: CacheStore) -> None:
         ("trend_by_period", {"date_column": "date", "period": "month", "group_key": "date_month",
                              "metric": "revenue", "sort_key": "date_month", "title": "Trend"}),
         ("segment_summary", {"segment": "region", "metric": "revenue", "title": "Segments"}),
+        ("correlation_report", {"title": "Correlations"}),
+        ("frequency_report", {"column": "region", "title": "Regions"}),
     ):
         values, _ = await execute(wrap(block_id, params), cache)
         md = json.loads(cache.get(values["b/r"].fingerprint).decode())["markdown"]

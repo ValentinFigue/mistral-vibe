@@ -45,6 +45,21 @@ def test_multiline_pipeline_folds_continuation_lines() -> None:
     assert multi.nodes["s3"].inputs == {"t1": "s2"}
 
 
+def test_triple_quoted_sql_carries_quotes_and_commas() -> None:
+    # Agents embed SQL with """...""" to avoid escaping. The query holds single quotes, double
+    # quotes, commas, and a pipe — none of which may trip the top-level splitter.
+    g = parse_pipeline(
+        'sample_dataset(name="sales")'
+        ' | sql(query="""SELECT country, sum(revenue) AS r FROM t1'
+        " WHERE country='fr' AND product <> 'a|b' GROUP BY 1, 2 ORDER BY r DESC\"\"\")"
+        ' | to_markdown(title="X")'
+    )
+    assert list(g.nodes) == ["s1", "s2", "s3"]
+    q = g.nodes["s2"].params["query"]
+    assert "country='fr'" in q and "'a|b'" in q and "GROUP BY 1, 2" in q
+    assert g.nodes["s2"].inputs == {"t1": "s1"} and g.nodes["s3"].inputs == {"table": "s2"}
+
+
 def test_named_refs_and_sql_join_wiring() -> None:
     g = parse_pipeline(
         'orders = sample_dataset(name="sales")\n'

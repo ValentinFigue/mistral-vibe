@@ -34,26 +34,40 @@ class DSLError(ValueError):
 
 
 def _split_top_level(text: str, sep: str) -> list[str]:
-    """Split on ``sep`` outside of (), [], and quotes."""
+    """Split on ``sep`` outside of (), [], and quotes.
+
+    Strings may be single- or double-quoted, or **triple-quoted** (``\"\"\"…\"\"\"`` / ``'''…'''``)
+    — the triple form lets an embedded ``sql(query=…)`` carry unescaped single quotes, double
+    quotes, commas, and ``|`` without tripping the splitter.
+    """
     parts: list[str] = []
     depth = 0
-    quote: str | None = None
+    quote: str | None = None  # active closing delimiter: ' " ''' or \"\"\"
     buf: list[str] = []
     i = 0
-    while i < len(text):
+    n = len(text)
+    while i < n:
         ch = text[i]
         if quote:
-            buf.append(ch)
-            if ch == "\\" and i + 1 < len(text):
+            if ch == "\\" and len(quote) == 1 and i + 1 < n:  # escape (single-char quotes only)
+                buf.append(ch)
                 buf.append(text[i + 1])
                 i += 2
                 continue
-            if ch == quote:
+            if text.startswith(quote, i):  # closing delimiter (1 or 3 chars)
+                buf.append(quote)
+                i += len(quote)
                 quote = None
-        elif ch in "\"'":
-            quote = ch
+                continue
             buf.append(ch)
-        elif ch in "([":
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = text[i : i + 3] if text[i : i + 3] in {'"""', "'''"} else ch
+            buf.append(quote)
+            i += len(quote)
+            continue
+        if ch in "([":
             depth += 1
             buf.append(ch)
         elif ch in ")]":

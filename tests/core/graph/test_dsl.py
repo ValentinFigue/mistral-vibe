@@ -94,6 +94,17 @@ _REALISTIC_PROGRAMS = [
     'sample_dataset(name="sales") | rank_by(group_key="country", metric="revenue", n=3, title="T")',
     # list + int params; a pure sink terminal
     'read_csv(path="x.csv") | expect_columns(columns=["a", "b"]) | to_csv(path="out.csv")',
+    # alias assignment (`metrics = raw`) then reuse — the live `metrics = raw` failure
+    'raw = read_csv(path="x.csv") | sql(query="""SELECT 1 AS a""")\n'
+    "metrics = raw\n"
+    "metrics | to_markdown()",
+    # dangling trailing `|` immediately followed by a new assignment (must not glue)
+    'raw = read_csv(path="x.csv") |\n'
+    "metrics = raw | to_markdown()",
+    # multi-assignment fan-out
+    'a = sample_dataset(name="sales")\n'
+    'b = a | filter_rows(column="channel", value="web")\n'
+    "b | to_markdown()",
 ]
 
 
@@ -157,6 +168,8 @@ def test_literals_and_lists() -> None:
         ('orders | to_markdown()', "unknown reference 'orders'"),
         ('to_markdown(title=)', "cannot parse value"),
         ('to_markdown(title="x"', "expected `op"),
+        ('sample_dataset(name="sales") || to_markdown()', "empty step"),  # double pipe
+        ('| to_markdown()', "empty step"),  # leading pipe, nothing before
     ],
 )
 def test_parse_errors(program: str, match: str) -> None:

@@ -85,13 +85,11 @@ def _split_top_level(text: str, sep: str) -> list[str]:
     return parts
 
 
-def _statements(text: str) -> list[str]:
-    """Split a program into statements, quote- and continuation-aware.
+def _scan_lines(text: str) -> list[str]:
+    """Split ``text`` into lines at newlines **outside** any quoted string, stripping ``#`` comments.
 
-    A newline ends a statement only when it is **outside** any quoted string, so a multi-line
-    ``sql(query=\"\"\"…\"\"\")`` stays one statement. A ``#`` outside a string starts a line
-    comment. Finally, a statement beginning with ``|`` is folded onto the previous one, so the
-    readable multi-line pipeline form (leading-``|`` continuations) parses like a single line.
+    A newline inside a quoted string (a multi-line ``sql(query=\"\"\"…\"\"\")``) does not end a line;
+    a ``#`` outside a string starts a comment to end of line. Raises on an unterminated string.
     """
     lines: list[str] = []
     quote: str | None = None
@@ -101,47 +99,57 @@ def _statements(text: str) -> list[str]:
         ch = text[i]
         if quote:
             if ch == "\\" and len(quote) == 1 and i + 1 < n:  # escape (single-char quotes only)
-                buf.append(ch)
-                buf.append(text[i + 1])
+                buf.append(ch + text[i + 1])
                 i += 2
-                continue
-            if text.startswith(quote, i):
+            elif text.startswith(quote, i):
                 buf.append(quote)
                 i += len(quote)
                 quote = None
-                continue
-            buf.append(ch)  # any char (incl. newline) inside the string is literal
-            i += 1
+            else:
+                buf.append(ch)  # any char (incl. newline) inside the string is literal
+                i += 1
             continue
         if ch in "\"'":
             quote = text[i : i + 3] if text[i : i + 3] in {'"""', "'''"} else ch
             buf.append(quote)
             i += len(quote)
-            continue
-        if ch == "#":  # line comment (outside a string) — skip to the newline, keep the newline
+        elif ch == "#":  # line comment (outside a string) — skip to the newline, keep the newline
             while i < n and text[i] != "\n":
                 i += 1
-            continue
-        if ch == "\n":
+        elif ch == "\n":
             lines.append("".join(buf))
             buf = []
             i += 1
-            continue
-        buf.append(ch)
-        i += 1
+        else:
+            buf.append(ch)
+            i += 1
     if quote:
         raise DSLError(f"unterminated string in {text!r}")
     lines.append("".join(buf))
+    return lines
 
+
+def _statements(text: str) -> list[str]:
+    """Split a program into statements, quote- and continuation-aware.
+
+    Lines are split outside strings (see :func:`_scan_lines`), then folded: a line starting with
+    ``|`` — or a line following one that ends with a dangling ``|`` — continues the previous
+    statement, so the readable multi-line pipeline form parses like a single line. A line that is
+    itself an assignment (``name = …``) always starts its own statement.
+    """
     statements: list[str] = []
-    for line in lines:
+    for line in _scan_lines(text):
         stripped = line.strip()
         if not stripped:
             continue
-        # Fold onto the previous statement when the pipe sits at either boundary: this line
-        # starts with `|`, or the previous line ended with a dangling `|`. (A `|` inside a string
-        # is safe — a newline inside a quote never ended a statement here.)
-        if statements and (stripped.startswith("|") or statements[-1].endswith("|")):
+        # Fold a continuation onto the previous statement when the pipe sits at either boundary:
+        # this line starts with `|` (always a continuation), or the previous statement ended with a
+        # dangling `|` — EXCEPT never fold a line that is itself an assignment (`name = …`), which
+        # must start its own statement (otherwise `foo |` + `bar = baz` glues into one broken line).
+        starts_pipe = stripped.startswith("|")
+        prev_dangling = bool(statements) and statements[-1].endswith("|")
+        is_assignment = _ASSIGN_RE.match(stripped) is not None
+        if statements and (starts_pipe or (prev_dangling and not is_assignment)):
             statements[-1] = f"{statements[-1]} {stripped}"
         else:
             statements.append(stripped)
@@ -208,9 +216,15 @@ def _add_statement(
 ) -> None:
     """Parse one `[name =] pipeline` statement, adding its nodes and recording the name."""
     segments = _split_top_level(body, "|")
+    # Tolerate a single dangling trailing `|` (agent started a new statement after it); an empty
+    # interior/leading segment is a real mistake (`||` or a stray leading `|`).
+    while len(segments) > 1 and segments[-1].strip() == "":
+        segments.pop()
     prev: str | None = None
     for idx, raw_seg in enumerate(segments):
         seg = raw_seg.strip()
+        if not seg:
+            raise DSLError("empty step in pipeline (check for '||' or a stray '|')")
         if _IDENT_RE.match(seg):  # a bare reference to an earlier node (pipeline start only)
             if idx != 0:
                 raise DSLError(f"reference {seg!r} may only start a pipeline")

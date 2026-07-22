@@ -328,16 +328,35 @@ async def distinct(table: Table, columns: list[str] | None = None) -> Table:
     return _table(table.columns, kept)
 
 
+# op → (a, b) → value. Arithmetic yields a number; comparisons yield 1/0 (a handy binary target).
+# `/` guards divide-by-zero → None. Comparisons wrap in int() so True/False become 1/0.
+_DERIVE_OPS: dict[str, Any] = {
+    "+": lambda a, b: a + b,
+    "-": lambda a, b: a - b,
+    "*": lambda a, b: a * b,
+    "/": lambda a, b: a / b if b != 0 else None,
+    ">": lambda a, b: int(a > b),
+    ">=": lambda a, b: int(a >= b),
+    "<": lambda a, b: int(a < b),
+    "<=": lambda a, b: int(a <= b),
+    "==": lambda a, b: int(a == b),
+    "!=": lambda a, b: int(a != b),
+}
+
+
 @operator(library=_LIB)
 async def derive_column(
-    table: Table, name: str, left: str, op: Literal["+", "-", "*", "/"], right: str
+    table: Table,
+    name: str,
+    left: str,
+    op: Literal["+", "-", "*", "/", ">", ">=", "<", "<=", "==", "!="],
+    right: str,
 ) -> Table:
-    """Add ``name`` = ``left`` <op> ``right`` (op ∈ +,-,*,/). ``right`` is a numeric constant or
-    another column name.
+    """Add ``name`` = ``left`` <op> ``right``. Arithmetic (+,-,*,/) yields a number; comparisons
+    (>,>=,<,<=,==,!=) yield 1/0 — handy for a binary target (e.g. ``revenue > 1000``). ``right`` is
+    a numeric constant or another column name. For multi-branch conditionals, use ``sql``'s CASE WHEN.
     """
     _require_numeric(table, left, "derive_column")
-    if op not in {"+", "-", "*", "/"}:
-        raise ValueError(f"derive_column: op must be +,-,*,/, got {op!r}")
     const: float | None = None
     try:
         const = float(right)
@@ -347,11 +366,7 @@ async def derive_column(
     def compute(r: dict[str, Any]) -> Any:
         a = r[left]
         b = const if const is not None else r[right]
-        if a is None or b is None:
-            return None
-        if op == "/":
-            return a / b if b != 0 else None
-        return {"+": a + b, "-": a - b, "*": a * b}[op]
+        return None if a is None or b is None else _DERIVE_OPS[op](a, b)
 
     cols = table.columns + ([name] if name not in table.columns else [])
     rows = [{**r, name: compute(r)} for r in table.rows]

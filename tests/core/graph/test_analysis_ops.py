@@ -66,6 +66,10 @@ async def test_derive_column_and_cast() -> None:
     # ratio with a constant
     ratio = await A.derive_column(t, name="half", left="revenue", op="/", right="2")
     assert ratio.rows[0]["half"] == pytest.approx(t.rows[0]["revenue"] / 2)
+    # a comparison yields a 1/0 binary column (e.g. a target threshold)
+    hi = await A.derive_column(t, name="hi", left="revenue", op=">", right="2000")
+    assert all(r["hi"] == (1 if r["revenue"] > 2000 else 0) for r in hi.rows)
+    assert set(r["hi"] for r in hi.rows) <= {0, 1}
 
 
 @pytest.mark.asyncio

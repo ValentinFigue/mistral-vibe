@@ -24,6 +24,27 @@ def test_linear_chain_auto_wires() -> None:
     assert g.nodes["s4"].params == {"by": "revenue_sum", "n": 3}
 
 
+def test_multiline_pipeline_folds_continuation_lines() -> None:
+    # The readable multi-line form (a leading `|` continues the previous line) parses to the
+    # same graph as the single-line form — this is what the analyst prompt teaches agents to write.
+    multi = parse_pipeline(
+        '\n'
+        'read_csv(path="orders.csv")\n'
+        '  | expect_no_nulls(columns=["revenue", "cost"])\n'
+        '  | sql(query="SELECT channel, sum(revenue) r FROM t1 GROUP BY channel ORDER BY r DESC")\n'
+        '  | to_markdown(title="By channel")\n'
+    )
+    single = parse_pipeline(
+        'read_csv(path="orders.csv") '
+        '| expect_no_nulls(columns=["revenue", "cost"]) '
+        '| sql(query="SELECT channel, sum(revenue) r FROM t1 GROUP BY channel ORDER BY r DESC") '
+        '| to_markdown(title="By channel")'
+    )
+    assert list(multi.nodes) == list(single.nodes) == ["s1", "s2", "s3", "s4"]
+    assert multi.nodes["s2"].inputs == {"table": "s1"}
+    assert multi.nodes["s3"].inputs == {"t1": "s2"}
+
+
 def test_named_refs_and_sql_join_wiring() -> None:
     g = parse_pipeline(
         'orders = sample_dataset(name="sales")\n'

@@ -161,11 +161,23 @@ def _add_statement(
 
 
 def parse_pipeline(text: str) -> Graph:
-    """Parse a DSL program into a :class:`Graph`. Raises :class:`DSLError` on any problem."""
+    """Parse a DSL program into a :class:`Graph`. Raises :class:`DSLError` on any problem.
+
+    A pipeline may be written across lines for readability: a line beginning with ``|`` is a
+    continuation that is folded onto the previous statement (so ``read_csv(...)\\n | sql(...)``
+    is one pipeline). One statement per logical line otherwise; ``#`` starts a line comment.
+    """
     graph = Graph()
     named: dict[str, str] = {}  # assigned name -> node id
     counter = itertools.count(1)
-    statements = [s for s in (ln.split("#", 1)[0].strip() for ln in text.splitlines()) if s]
+    statements: list[str] = []
+    for line in (ln.split("#", 1)[0].strip() for ln in text.splitlines()):
+        if not line:
+            continue
+        if line.startswith("|") and statements:
+            statements[-1] = f"{statements[-1]} {line}"  # fold continuation onto the pipeline
+        else:
+            statements.append(line)
     if not statements:
         raise DSLError("empty pipeline")
     for stmt in statements:

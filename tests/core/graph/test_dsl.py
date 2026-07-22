@@ -45,6 +45,64 @@ def test_multiline_pipeline_folds_continuation_lines() -> None:
     assert multi.nodes["s3"].inputs == {"t1": "s2"}
 
 
+def test_multiline_triple_quoted_sql_body() -> None:
+    # The shape agents actually write: a multi-line pipeline whose sql(query="""...""") body
+    # spans several lines. Newlines inside the triple-quoted string must NOT split the statement.
+    g = parse_pipeline(
+        'read_csv(path="orders.csv")\n'
+        '  | expect_no_nulls(columns=["revenue", "cost"])\n'
+        '  | sql(query="""\n'
+        "      SELECT channel, sum(revenue) AS r\n"
+        "      FROM t1\n"
+        "      WHERE channel = 'web'\n"
+        "      GROUP BY 1\n"
+        '  """)\n'
+        '  | to_markdown(title="X")'
+    )
+    assert list(g.nodes) == ["s1", "s2", "s3", "s4"]
+    q = g.nodes["s3"].params["query"]
+    assert "channel = 'web'" in q and "GROUP BY 1" in q and "\n" in q  # body kept, incl. newlines
+    assert g.nodes["s3"].inputs == {"t1": "s2"}
+
+
+# A batch of realistic agent-authored programs — the parser must accept every one. Grown from
+# actual live failures; add a case here whenever a new agent-written form is found to break.
+_REALISTIC_PROGRAMS = [
+    # trailing-`|` continuation (pipe at end of line, not start of next)
+    'read_csv(path="x.csv") |\n sql(query="SELECT * FROM t1") |\n to_markdown()',
+    # leading `#` comment + blank lines + indented continuation
+    '# revenue report\n\nsample_dataset(name="sales")\n  | to_markdown(title="X")\n',
+    # SQL string concat (||) and LIKE % inside a triple-quoted query
+    'sample_dataset(name="sales") | sql(query="""SELECT country||region AS cr'
+    " FROM t1 WHERE country LIKE 'f%'\"\"\") | to_markdown()",
+    # aggregate parens + commas inside SQL (must not split args or trip paren depth)
+    'sample_dataset(name="sales") | sql(query="""SELECT count(*), sum(revenue)'
+    ' FROM t1 GROUP BY 1, 2""") | to_markdown()',
+    # SQL -- line comment inside a multi-line triple-quoted body
+    'sample_dataset(name="sales") | sql(query="""SELECT a -- the col\nFROM t1""") | to_markdown()',
+    # SQL # inside a triple-quoted body must stay literal (not treated as a DSL comment)
+    'sample_dataset(name="sales") | sql(query="""SELECT a # kept\nFROM t1""") | to_markdown()',
+    # triple-single-quoted multi-line body with an embedded single quote
+    "sample_dataset(name=\"sales\") | sql(query='''\nSELECT a FROM t1\nWHERE a = 'x'\n''')"
+    ' | to_markdown()',
+    # single-quoted outer arg string
+    "sample_dataset(name=\"sales\") | sql(query='SELECT * FROM t1 WHERE x = 5') | to_markdown()",
+    # double-quoted identifiers inside a triple-quoted query
+    'sample_dataset(name="sales") | sql(query="""SELECT "weird col" AS w FROM t1""")'
+    ' | to_markdown()',
+    # block used like an operator
+    'sample_dataset(name="sales") | rank_by(group_key="country", metric="revenue", n=3, title="T")',
+    # list + int params; a pure sink terminal
+    'read_csv(path="x.csv") | expect_columns(columns=["a", "b"]) | to_csv(path="out.csv")',
+]
+
+
+@pytest.mark.parametrize("program", _REALISTIC_PROGRAMS)
+def test_realistic_agent_programs_parse(program: str) -> None:
+    g = parse_pipeline(program)
+    assert len(g.nodes) >= 2  # every program builds a real multi-step graph
+
+
 def test_triple_quoted_sql_carries_quotes_and_commas() -> None:
     # Agents embed SQL with """...""" to avoid escaping. The query holds single quotes, double
     # quotes, commas, and a pipe — none of which may trip the top-level splitter.

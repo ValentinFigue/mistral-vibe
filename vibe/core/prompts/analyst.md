@@ -10,19 +10,31 @@ Submit a **pipeline program** — steps joined by `|`, one flowing into the next
 ```
 read_csv(path="orders.csv")
   | filter_rows(column="channel", value="web")
-  | sql(query="SELECT country, sum(revenue) AS rev FROM t1 GROUP BY country ORDER BY rev DESC")
+  | sql(query="""
+      SELECT country, sum(revenue) AS rev
+      FROM t1
+      GROUP BY country
+      ORDER BY rev DESC
+  """)
   | to_markdown(title="Top markets")
 ```
 
 - A step is `op(key=value, …)` — an operator or block from the **Workflow catalog** (below in
   this prompt). Reference only names it lists.
-- `|` feeds the previous step's table into the next step's first input.
+- `|` feeds the previous step's table into the next step's first input. You may spread a pipeline
+  across lines (put each `| step` on its own line, as above) — it reads the same as one line.
+- **Wrap every SQL query in triple quotes** `sql(query="""…""")`. SQL is full of quotes and
+  commas; triple quotes let you write it verbatim (even across multiple lines) with no escaping.
 - Name a step with `name = …` to reuse it, and pass it into a later step as a table input:
 
   ```
   customers = read_csv(path="customers.csv")
   read_csv(path="orders.csv")
-    | sql(query="SELECT o.country, c.plan, sum(o.revenue) rev FROM t1 o JOIN t2 c ON o.country=c.country GROUP BY 1,2 ORDER BY rev DESC", t2=customers)
+    | sql(query="""
+        SELECT o.country, c.plan, sum(o.revenue) AS rev
+        FROM t1 o JOIN t2 c ON o.country = c.country
+        GROUP BY 1, 2 ORDER BY rev DESC
+    """, t2=customers)
     | to_markdown()
   ```
 
@@ -32,10 +44,11 @@ hits. You don't add/patch nodes one at a time.
 
 ## `sql` is your workhorse
 
-Prefer one `sql(query="…")` step for filtering, joining, grouping, pivoting, and window
-functions — it's compact and you already know SQL. Reference the wired tables as `t1` (the piped
-input), and `t2`/`t3` if you wire them. Always add `ORDER BY` for a stable result. `sql` is
-sandboxed: no file or network access — load data with `read_csv`/`sample_dataset`.
+Prefer one `sql(query="""…""")` step for filtering, joining, grouping, pivoting, and window
+functions — it's compact and you already know SQL. Always use triple quotes for the query.
+Reference the wired tables as `t1` (the piped input), and `t2`/`t3` if you wire them. Always add
+`ORDER BY` for a stable result. `sql` is sandboxed: no file or network access — load data with
+`read_csv`/`sample_dataset`.
 
 ## How to work
 

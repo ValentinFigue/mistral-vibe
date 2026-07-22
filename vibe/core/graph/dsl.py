@@ -85,6 +85,69 @@ def _split_top_level(text: str, sep: str) -> list[str]:
     return parts
 
 
+def _statements(text: str) -> list[str]:
+    """Split a program into statements, quote- and continuation-aware.
+
+    A newline ends a statement only when it is **outside** any quoted string, so a multi-line
+    ``sql(query=\"\"\"…\"\"\")`` stays one statement. A ``#`` outside a string starts a line
+    comment. Finally, a statement beginning with ``|`` is folded onto the previous one, so the
+    readable multi-line pipeline form (leading-``|`` continuations) parses like a single line.
+    """
+    lines: list[str] = []
+    quote: str | None = None
+    buf: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == "\\" and len(quote) == 1 and i + 1 < n:  # escape (single-char quotes only)
+                buf.append(ch)
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            if text.startswith(quote, i):
+                buf.append(quote)
+                i += len(quote)
+                quote = None
+                continue
+            buf.append(ch)  # any char (incl. newline) inside the string is literal
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = text[i : i + 3] if text[i : i + 3] in {'"""', "'''"} else ch
+            buf.append(quote)
+            i += len(quote)
+            continue
+        if ch == "#":  # line comment (outside a string) — skip to the newline, keep the newline
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "\n":
+            lines.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if quote:
+        raise DSLError(f"unterminated string in {text!r}")
+    lines.append("".join(buf))
+
+    statements: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Fold onto the previous statement when the pipe sits at either boundary: this line
+        # starts with `|`, or the previous line ended with a dangling `|`. (A `|` inside a string
+        # is safe — a newline inside a quote never ended a statement here.)
+        if statements and (stripped.startswith("|") or statements[-1].endswith("|")):
+            statements[-1] = f"{statements[-1]} {stripped}"
+        else:
+            statements.append(stripped)
+    return statements
+
+
 def _input_ports(op: str) -> tuple[str, ...]:
     if is_block(op):
         return tuple(get_block(op).input_ports)
@@ -178,20 +241,14 @@ def parse_pipeline(text: str) -> Graph:
     """Parse a DSL program into a :class:`Graph`. Raises :class:`DSLError` on any problem.
 
     A pipeline may be written across lines for readability: a line beginning with ``|`` is a
-    continuation that is folded onto the previous statement (so ``read_csv(...)\\n | sql(...)``
-    is one pipeline). One statement per logical line otherwise; ``#`` starts a line comment.
+    continuation folded onto the previous statement, and a multi-line ``sql(query=\"\"\"…\"\"\")``
+    stays a single statement (newlines inside a string do not split it). ``#`` starts a line
+    comment. See :func:`_statements`.
     """
     graph = Graph()
     named: dict[str, str] = {}  # assigned name -> node id
     counter = itertools.count(1)
-    statements: list[str] = []
-    for line in (ln.split("#", 1)[0].strip() for ln in text.splitlines()):
-        if not line:
-            continue
-        if line.startswith("|") and statements:
-            statements[-1] = f"{statements[-1]} {line}"  # fold continuation onto the pipeline
-        else:
-            statements.append(line)
+    statements = _statements(text)
     if not statements:
         raise DSLError("empty pipeline")
     for stmt in statements:

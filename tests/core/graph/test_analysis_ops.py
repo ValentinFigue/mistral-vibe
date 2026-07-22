@@ -76,6 +76,42 @@ async def test_date_part_and_describe() -> None:
     desc = await A.describe(t, columns=["revenue"])
     row = desc.rows[0]
     assert row["column"] == "revenue" and row["count"] == len(t.rows)
+    # median/quartiles are now part of describe, ordered min ≤ p25 ≤ median ≤ p75 ≤ max
+    assert set(desc.columns) >= {"min", "p25", "median", "p75", "max"}
+    assert row["min"] <= row["p25"] <= row["median"] <= row["p75"] <= row["max"]
+
+
+@pytest.mark.asyncio
+async def test_quantile_outliers_and_distribution() -> None:
+    t = await _sales()
+    q90 = await A.quantile(t, column="revenue", q=0.9)
+    assert q90.columns == ["quantile"] and len(q90.rows) == 1
+    assert isinstance(q90.rows[0]["quantile"], (int, float))
+
+    out = await A.outliers_iqr(t, column="revenue")
+    r = out.rows[0]
+    assert set(out.columns) == {"lower", "upper", "count", "total"}
+    assert r["lower"] <= r["upper"] and 0 <= r["count"] <= r["total"] == len(t.rows)
+
+    dist = await A.distribution(t, column="revenue")
+    assert set(dist.columns) == {"mean", "std", "skewness", "kurtosis"} and len(dist.rows) == 1
+
+    # q out of range is a clear error
+    with pytest.raises(ValueError, match="q must be in"):
+        await A.quantile(t, column="revenue", q=1.5)
+
+
+@pytest.mark.asyncio
+async def test_answer_single_value_and_rounding() -> None:
+    # A 1×1 table → the report text is exactly the value; decimals rounds numerics.
+    r = await A.answer(A.Table(columns=["quantile"], rows=[{"quantile": 42.17346}]), decimals=2)
+    assert r.markdown == "42.17"
+    # non-numeric passes through untouched even with decimals set
+    r2 = await A.answer(A.Table(columns=["top"], rows=[{"top": "emea"}]), decimals=2)
+    assert r2.markdown == "emea"
+    # not a 1×1 table → clear error
+    with pytest.raises(ValueError, match="expected a 1.1 table"):
+        await A.answer(A.Table(columns=["a", "b"], rows=[{"a": 1, "b": 2}]))
 
 
 @pytest.mark.asyncio
@@ -233,7 +269,8 @@ def test_importing_analysis_does_not_load_pandas() -> None:
         "import sys; import vibe.core.graph.library.analysis;"
         " assert 'pandas' not in sys.modules, 'pandas loaded at import time';"
         " assert 'matplotlib' not in sys.modules, 'matplotlib loaded at import time';"
-        " assert 'duckdb' not in sys.modules, 'duckdb loaded at import time'"
+        " assert 'duckdb' not in sys.modules, 'duckdb loaded at import time';"
+        " assert 'sklearn' not in sys.modules, 'sklearn loaded at import time'"
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -363,3 +400,25 @@ async def test_all_analysis_blocks_run(cache: CacheStore) -> None:
         values, _ = await execute(wrap(block_id, params), cache)
         md = json.loads(cache.get(values["b/r"].fingerprint).decode())["markdown"]
         assert md.startswith("# ")
+
+
+@pytest.mark.timeout(60)  # cold sklearn/scipy import + fits, tolerant of CI/xdist contention
+@pytest.mark.asyncio
+async def test_ml_operators_run_and_are_seeded_deterministic() -> None:
+    # Skipped unless the optional [ml] extra is installed (uv run --extra ml). Cheap models keep it
+    # fast; determinism is what matters for cache correctness.
+    pytest.importorskip("sklearn")
+    t = await _sales()
+
+    reg = await A.ml_regression(t, target="revenue", features=["units", "cost"], model="linear", metric="r2")
+    assert reg.columns == ["score"] and isinstance(reg.rows[0]["score"], (int, float))
+
+    clf1 = await A.ml_classification(t, target="region", features=["revenue", "units", "cost"], model="tree")
+    clf2 = await A.ml_classification(t, target="region", features=["revenue", "units", "cost"], model="tree")
+    assert clf1.rows[0]["score"] == clf2.rows[0]["score"]  # fixed seed → deterministic
+
+    clus = await A.ml_cluster(t, features=["revenue", "units"], k=2)
+    assert clus.columns == ["score"] and -1.0 <= clus.rows[0]["score"] <= 1.0  # silhouette range
+
+    with pytest.raises(ValueError, match="model must be one of"):
+        await A.ml_regression(t, target="revenue", features=["units"], model="nope")

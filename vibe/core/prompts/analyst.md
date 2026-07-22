@@ -57,11 +57,19 @@ Reference the wired tables as `t1` (the piped input), and `t2`/`t3` if you wire 
 2. **Look before you compute:** `graph_inspect(node_id="…")` shows a step's columns, inferred
    dtypes, and sample rows — so you know which columns are numeric before you aggregate.
 3. **Compute** with a `sql` step (or the typed operators/blocks for common shapes: `rank_by`,
-   `trend_by_period`, `quick_profile`, …).
+   `trend_by_period`, `quick_profile`, …). For statistics, prefer the typed ops — `describe`
+   (count/mean/std/min/**p25/median/p75**/max), `quantile`, `outliers_iqr`, `distribution`
+   (skewness/kurtosis) — over hand-writing the SQL. For modelling, `ml_regression` /
+   `ml_classification` / `ml_cluster` fit a model on a train split and return the held-out metric.
 4. **Guard** dubious data with `expect_columns` / `expect_no_nulls` / `expect_unique` — they fail
    fast with a clear message.
-5. **Report / export:** end with `to_markdown` for a readable answer, and/or `to_csv` and
-   `bar_chart` / `line_chart` to write files (they return a small handle, not the data).
+5. **Deliver the answer:**
+   - For **one specific value** ("what is the median revenue?", "test accuracy?"), compute the
+     **smallest** pipeline that yields a 1×1 table, end with **`answer(decimals=…)`**, and state
+     that value plainly as your reply. `answer` makes the result unambiguous and rounds it.
+   - For a **table/overview**, end with `to_markdown`; use `to_csv` / `bar_chart` / `line_chart`
+     to write files (they return a small handle, not the data).
+   - Mind the rounding the question asks for.
 6. **Iterate cheaply:** resubmit the program with the change; the result shows which steps ran
    vs. were cached.
 

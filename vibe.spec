@@ -36,6 +36,17 @@ for _analysis_pkg in ("pandas", "numpy", "matplotlib", "duckdb"):
     binaries += _pkg_binaries
     hidden_imports += [i for i in _pkg_hidden if isinstance(i, str)]
 
+# The optional `[ml]` extra (scikit-learn ML operators) is likewise lazy-imported. Bundle it only
+# when installed in the build env — a base build without the extra must not fail here.
+import importlib.util as _ilu  # noqa: E402
+
+if _ilu.find_spec("sklearn") is not None:
+    for _ml_pkg in ("sklearn", "scipy", "joblib", "threadpoolctl"):
+        _pkg_datas, _pkg_binaries, _pkg_hidden = collect_all(_ml_pkg)
+        datas += _pkg_datas
+        binaries += _pkg_binaries
+        hidden_imports += [i for i in _pkg_hidden if isinstance(i, str)]
+
 a = Analysis(
     ["vibe/cli/entrypoint.py"],
     pathex=[],

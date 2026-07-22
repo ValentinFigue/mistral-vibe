@@ -464,24 +464,30 @@ async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str] |
 
 @operator(library=_LIB)
 async def describe(table: Table, columns: list[str] | None = None) -> Table:
-    """Summary stats (count, mean, std, min, max) per numeric column (empty → all numeric)."""
+    """Summary stats per numeric column (empty → all numeric): count, mean, std, min, p25,
+    median, p75, max.
+    """
     import pandas as pd
 
     cols = _cols(columns) or [c for c in table.columns if _column_is_numeric(table, c)]
     _need(table, *cols)
     df = _to_df(table)
-    out_cols = ["column", "count", "mean", "std", "min", "max"]
+    out_cols = ["column", "count", "mean", "std", "min", "p25", "median", "p75", "max"]
     rows: list[dict[str, Any]] = []
     for c in cols:
         _require_numeric(table, c, "describe")
         s = pd.to_numeric(df[c], errors="coerce").dropna()
+        has = len(s) > 0
         rows.append({
             "column": c,
             "count": int(s.count()),
-            "mean": round(float(s.mean()), 4) if len(s) else None,
+            "mean": round(float(s.mean()), 4) if has else None,
             "std": round(float(s.std(ddof=1)), 4) if len(s) > 1 else 0.0,
-            "min": float(s.min()) if len(s) else None,
-            "max": float(s.max()) if len(s) else None,
+            "min": float(s.min()) if has else None,
+            "p25": round(float(s.quantile(0.25)), 4) if has else None,
+            "median": round(float(s.median()), 4) if has else None,
+            "p75": round(float(s.quantile(0.75)), 4) if has else None,
+            "max": float(s.max()) if has else None,
         })
     return _from_df(pd.DataFrame(rows, columns=out_cols))
 
@@ -636,6 +642,205 @@ async def rolling(table: Table, column: str, window: int, name: str | None = Non
     return _from_df(df)
 
 
+@operator(library=_LIB)
+async def quantile(table: Table, column: str, q: float) -> Table:
+    """The ``q``-quantile (``q`` in [0, 1]) of a numeric ``column`` — a 1×1 table (``quantile``)."""
+    import pandas as pd
+
+    _require_numeric(table, column, "quantile")
+    if not 0.0 <= q <= 1.0:
+        raise ValueError(f"quantile: q must be in [0, 1], got {q}")
+    s = pd.to_numeric(_to_df(table)[column], errors="coerce").dropna()
+    val = s.quantile(q) if len(s) else float("nan")
+    return _from_df(pd.DataFrame([{"quantile": val}]).round(4))
+
+
+@operator(library=_LIB)
+async def outliers_iqr(table: Table, column: str, k: float = 1.5) -> Table:
+    """IQR outliers of a numeric ``column``: values outside [Q1 − k·IQR, Q3 + k·IQR].
+
+    Returns a 1-row summary — ``lower``, ``upper`` (the fences), ``count`` (outliers), ``total``.
+    """
+    import pandas as pd
+
+    _require_numeric(table, column, "outliers_iqr")
+    s = pd.to_numeric(_to_df(table)[column], errors="coerce").dropna()
+    if s.empty:
+        return _from_df(pd.DataFrame([{"lower": None, "upper": None, "count": 0, "total": 0}]))
+    q1, q3 = float(s.quantile(0.25)), float(s.quantile(0.75))
+    iqr = q3 - q1
+    lower, upper = q1 - k * iqr, q3 + k * iqr
+    count = int(((s < lower) | (s > upper)).sum())
+    row = {"lower": round(lower, 4), "upper": round(upper, 4), "count": count, "total": int(len(s))}
+    return _from_df(pd.DataFrame([row]))
+
+
+@operator(library=_LIB)
+async def distribution(table: Table, column: str) -> Table:
+    """Shape of a numeric ``column`` — a 1-row table: mean, std, skewness, kurtosis (Fisher)."""
+    import pandas as pd
+
+    _require_numeric(table, column, "distribution")
+    s = pd.to_numeric(_to_df(table)[column], errors="coerce").dropna()
+    row = {
+        "mean": s.mean(),
+        "std": s.std(ddof=1) if len(s) > 1 else 0.0,
+        "skewness": s.skew(),
+        "kurtosis": s.kurt(),
+    }
+    return _from_df(pd.DataFrame([row]).round(4))
+
+
+# --- machine learning (scikit-learn — optional `[ml]` extra) --------------------------------
+# sklearn is NOT a base dependency; these ops import it lazily and raise an actionable error when
+# it is absent. Results are deterministic for a fixed ``seed`` but depend on the scikit-learn
+# version, which the recipe fingerprint does NOT capture — bump CACHE_VERSION when upgrading it.
+
+
+def _require_sklearn() -> None:
+    try:
+        import sklearn  # noqa: F401
+    except ImportError as exc:  # only hit when the [ml] extra isn't installed
+        raise ValueError(
+            "ML operators need scikit-learn — install the optional extra: "
+            "`uv sync --extra ml` (or `pip install 'mistral-vibe[ml]'`)."
+        ) from exc
+
+
+def _ml_xy(table: Table, target: str, features: list[str]) -> tuple[Any, Any]:
+    """Build (X, y): one-hot-encode categorical features, drop rows with any missing value."""
+    import pandas as pd
+
+    feats = _cols(features)
+    if not feats:
+        raise ValueError("ml: `features` must list at least one column")
+    _need(table, target, *feats)
+    df = _to_df(table)[[*feats, target]].dropna()
+    if len(df) <= 1:
+        raise ValueError("ml: need at least 2 complete rows after dropping missing values")
+    return pd.get_dummies(df[feats]), df[target]
+
+
+def _score_table(value: float) -> Table:
+    import pandas as pd
+
+    return _from_df(pd.DataFrame([{"score": round(float(value), 4)}]))
+
+
+@operator(library=_LIB)
+async def ml_regression(
+    table: Table,
+    target: str,
+    features: list[str],
+    model: str = "linear",
+    metric: str = "r2",
+    test_size: float = 0.2,
+    seed: int = 0,
+) -> Table:
+    """Fit a regression model on a train split, score it on the held-out test split — a 1×1 table
+    (``score``). model ∈ linear, ridge, tree, rf; metric ∈ r2, rmse, mae. Categorical features are
+    one-hot encoded and rows with missing values dropped. Deterministic for a given ``seed``.
+    """
+    _require_sklearn()
+    import pandas as pd
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import LinearRegression, Ridge
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+    from sklearn.model_selection import train_test_split
+    from sklearn.tree import DecisionTreeRegressor
+
+    models = {
+        "linear": lambda: LinearRegression(),
+        "ridge": lambda: Ridge(random_state=seed),
+        "tree": lambda: DecisionTreeRegressor(random_state=seed),
+        "rf": lambda: RandomForestRegressor(random_state=seed),
+    }
+    if model not in models:
+        raise ValueError(f"ml_regression: model must be one of {sorted(models)}, got {model!r}")
+    if metric not in {"r2", "rmse", "mae"}:
+        raise ValueError(f"ml_regression: metric must be r2/rmse/mae, got {metric!r}")
+    x, y = _ml_xy(table, target, features)
+    y = pd.to_numeric(y, errors="coerce")
+    x_tr, x_te, y_tr, y_te = train_test_split(x, y, test_size=test_size, random_state=seed)
+    est = models[model]()
+    est.fit(x_tr, y_tr)
+    pred = est.predict(x_te)
+    score = {
+        "r2": lambda: r2_score(y_te, pred),
+        "rmse": lambda: mean_squared_error(y_te, pred) ** 0.5,
+        "mae": lambda: mean_absolute_error(y_te, pred),
+    }[metric]()
+    return _score_table(score)
+
+
+@operator(library=_LIB)
+async def ml_classification(
+    table: Table,
+    target: str,
+    features: list[str],
+    model: str = "logreg",
+    metric: str = "accuracy",
+    test_size: float = 0.2,
+    seed: int = 0,
+) -> Table:
+    """Fit a classifier on a train split, score it on the held-out test split — a 1×1 table
+    (``score``). model ∈ logreg, tree, rf; metric ∈ accuracy, f1 (weighted). Categorical features
+    are one-hot encoded and rows with missing values dropped. Deterministic for a given ``seed``.
+    """
+    _require_sklearn()
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.model_selection import train_test_split
+    from sklearn.tree import DecisionTreeClassifier
+
+    models = {
+        "logreg": lambda: LogisticRegression(max_iter=1000, random_state=seed),
+        "tree": lambda: DecisionTreeClassifier(random_state=seed),
+        "rf": lambda: RandomForestClassifier(random_state=seed),
+    }
+    if model not in models:
+        raise ValueError(f"ml_classification: model must be one of {sorted(models)}, got {model!r}")
+    if metric not in {"accuracy", "f1"}:
+        raise ValueError(f"ml_classification: metric must be accuracy/f1, got {metric!r}")
+    x, y = _ml_xy(table, target, features)
+    x_tr, x_te, y_tr, y_te = train_test_split(x, y, test_size=test_size, random_state=seed)
+    est = models[model]()
+    est.fit(x_tr, y_tr)
+    pred = est.predict(x_te)
+    score = (
+        accuracy_score(y_te, pred)
+        if metric == "accuracy"
+        else f1_score(y_te, pred, average="weighted")
+    )
+    return _score_table(score)
+
+
+@operator(library=_LIB)
+async def ml_cluster(
+    table: Table, features: list[str], k: int, metric: str = "silhouette", seed: int = 0
+) -> Table:
+    """K-means over ``features`` (categoricals one-hot encoded, missing rows dropped) — a 1×1 table
+    (``score``): ``silhouette`` (cohesion/separation, higher is better) or ``inertia``.
+    Deterministic for a given ``seed``.
+    """
+    _require_sklearn()
+    import pandas as pd
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+
+    if metric not in {"silhouette", "inertia"}:
+        raise ValueError(f"ml_cluster: metric must be silhouette/inertia, got {metric!r}")
+    feats = _cols(features)
+    _need(table, *feats)
+    x = pd.get_dummies(_to_df(table)[feats].dropna())
+    if len(x) <= k:
+        raise ValueError(f"ml_cluster: need more rows ({len(x)}) than clusters (k={k})")
+    km = KMeans(n_clusters=k, random_state=seed, n_init=10).fit(x)
+    score = silhouette_score(x, km.labels_) if metric == "silhouette" else km.inertia_
+    return _score_table(score)
+
+
 # --- data-quality gates --------------------------------------------------------------------
 
 
@@ -756,6 +961,24 @@ async def to_markdown(table: Table, title: str = "Report", max_rows: int = 50) -
         lines.append("")
         lines.append(f"_… {len(table.rows) - max_rows} more rows_")
     return Report(markdown="\n".join(lines))
+
+
+@operator(library=_LIB)
+async def answer(table: Table, decimals: int | None = None) -> Report:
+    """State a single result. Takes a **1×1 table** (one column, one row) and returns a report whose
+    text is exactly that value — rounded to ``decimals`` if given (numeric only). Use as the final
+    step of a "what is X?" pipeline so the answer is unambiguous; errors if the table isn't 1×1.
+    """
+    if len(table.columns) != 1 or len(table.rows) != 1:
+        raise ValueError(
+            f"answer: expected a 1×1 table (one column, one row), got {len(table.rows)} row(s) × "
+            f"{len(table.columns)} column(s) — reduce to a single value first "
+            "(e.g. a scalar sql/quantile/ml_* step)."
+        )
+    value = table.rows[0][table.columns[0]]
+    if decimals is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = round(float(value), decimals)
+    return Report(markdown=str(value))
 
 
 # --- classic-analysis blocks (the workflows, encoded) --------------------------------------

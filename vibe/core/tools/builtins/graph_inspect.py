@@ -3,11 +3,12 @@
 The analyst authors over real data whose columns it doesn't know a priori. `graph_patch`
 returns only compact handles for *terminal* nodes; to author the next step the agent often
 needs to *see* an intermediate — its columns, their inferred types, and a few sample rows.
-`graph_inspect` reads the node's materialized value straight from the session cache (no
+`graph_inspect` reads the node's materialized value straight from the shared result cache (no
 re-execution, no approval gate) and renders a compact schema + preview.
 
-It never mutates anything: the value must already have been produced by a prior `graph_patch`
-run. Built on the shared :func:`vibe.core.graph.render.materialize_node_value` cache-read path.
+It never mutates anything: the value must already have been produced by a prior `graph_patch`/
+`run_pipeline` run (in this or an earlier session — the cache is cross-session). Built on the
+shared :func:`vibe.core.graph.render.materialize_node_value` cache-read path.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, Field
 
 from vibe.core.graph import render
-from vibe.core.graph.cache import CacheStore
+from vibe.core.graph.cache import open_shared_cache
 from vibe.core.graph.model import Graph
 from vibe.core.graph.session_store import graph_dir as _session_graph_dir
 from vibe.core.tools.base import (
@@ -127,7 +128,7 @@ class GraphInspect(
             available = ", ".join(sorted(graph.nodes)) or "(none)"
             raise ToolError(f"unknown node {args.node_id!r}; nodes are: {available}")
 
-        cache = CacheStore(graph_dir / "cache.sqlite")
+        cache = open_shared_cache()  # shared cross-session store under VIBE_HOME
         try:
             text = render.materialize_node_value(graph, args.node_id, cache)
         finally:

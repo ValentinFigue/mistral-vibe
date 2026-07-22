@@ -181,7 +181,7 @@ class CommandRegistry:
             ),
             "graph": Command(
                 aliases=frozenset(["/graph"]),
-                description="Show the current workflow graph (or /graph <node> to inspect one)",
+                description="Show the current workflow graph (/graph cache [clear --yes] for the shared result cache)",
                 handler="_show_graph",
             ),
             "blocks": Command(

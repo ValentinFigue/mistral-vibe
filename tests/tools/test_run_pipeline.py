@@ -62,6 +62,19 @@ async def test_run_pipeline_incremental_rerun(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_pipeline_reuses_cache_across_sessions(tmp_path: Path) -> None:
+    # The result cache is shared under VIBE_HOME, not per session-dir. A brand-new session
+    # (fresh tool state + a different session dir) submitting the same recipe recomputes nothing.
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    first = await _run(_tool(), _PIPELINE, _ctx(a))
+    assert len(first.fresh) == 3 and first.cached == []  # session A: cold cache
+    second = await _run(_tool(), _PIPELINE, _ctx(b))
+    assert second.fresh == [] and len(second.cached) == 3  # session B: all cross-session hits
+
+
+@pytest.mark.asyncio
 async def test_run_pipeline_library_scoping(tmp_path: Path) -> None:
     # An out-of-library op (the margin demo's sales_source) is rejected for the analyst.
     with pytest.raises(ToolError, match="not in the 'analysis' library"):

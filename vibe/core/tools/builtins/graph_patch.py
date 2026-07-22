@@ -29,7 +29,7 @@ from vibe.core.graph.blocks import (
     is_block,
     registered_blocks,
 )
-from vibe.core.graph.cache import CacheStore
+from vibe.core.graph.cache import SHARED_CACHE_MAX_BYTES, CacheStore, open_shared_cache
 
 # Registering the operator libraries the agents may use. The `analysis` library (data-analysis
 # kit) is the `analyst` profile's scoped catalog; the demo margin/research kits round out the
@@ -313,7 +313,10 @@ async def build_result(
         raise ToolError(f"invalid graph: {exc}") from exc
 
     delta = changed_nodes(current, new)
-    cache = CacheStore(graph_dir / "cache.sqlite")
+    cache = open_shared_cache()  # shared cross-session store under VIBE_HOME
+    # Trim the shared store to its soft budget once per run (a cheap SUM when under budget), so
+    # cross-session accumulation stays bounded. This run's fresh results are newest → not evicted.
+    cache.evict_to(SHARED_CACHE_MAX_BYTES)
     try:
         try:
             values, report = await execute(expanded, cache, expand_blocks=False)

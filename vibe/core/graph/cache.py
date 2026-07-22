@@ -1,18 +1,27 @@
 """Content-addressed result cache, backed by a single SQLite file.
 
 Results are keyed by their node fingerprint (the recipe hash). This one store serves
-three jobs at once:
+several jobs at once:
 
 * **intra-run incrementality** — a re-run re-pays only for nodes whose fingerprint changed;
 * **crash-resume** — a killed run finds every completed node already present;
-* **cross-run dedup** — an identical fingerprint is a silent ``INSERT OR IGNORE`` no-op.
+* **cross-run dedup** — an identical fingerprint is a silent ``INSERT OR IGNORE`` no-op;
+* **cross-session reuse** — the shared store (:func:`open_shared_cache`) lives under
+  ``VIBE_HOME`` (not the session dir), so an operation computed in one session is an instant
+  cache hit in the next. It is used by both graph-authoring agents (``graph`` and ``analyst``).
 
-Cross-*user* dedup is deliberately out of scope: the cache keys on the recipe, not the
-output, so an entry is trusted blindly — sharing a store across users is a trust boundary
-the design has not yet specified. M1's store is single, local, and trusted.
+Because the cache keys on the recipe (not the output), an entry is **trusted blindly**. Two
+consequences follow from making it cross-session:
 
-The store is append-only in M1 (no eviction — it grows unbounded); the ``byte_size`` and
-``created_at`` columns are carried so LRU/size GC is cheap to add later.
+* **Operator drift.** The fingerprint omits operator *code* version, so a changed operator
+  could return a stale cached result. Guard it at the storage layer: :data:`CACHE_VERSION` is
+  baked into the shared filename (``graph-cache-v{N}.sqlite``); bump it on any operator-semantics
+  change for a clean, total invalidation (the old file becomes garbage-collectable).
+* **Trust / privacy.** Cross-*user* sharing stays out of scope (the store is single-user, local).
+  Payloads (possibly PII from ``read_csv``) now persist across sessions and projects, so
+  :meth:`CacheStore.clear` (and deleting ``~/.vibe/graph-cache-*.sqlite``) is the purge path.
+
+The store is append-only by default (``byte_size``/``created_at`` are carried for LRU/size GC).
 """
 
 from __future__ import annotations
@@ -20,6 +29,16 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 import time
+
+from vibe.core.logger import logger
+
+# Bump when an operator's *semantics* change, to invalidate every cross-session cached result
+# (the recipe fingerprint does not capture operator code version). Baked into the shared filename.
+CACHE_VERSION = 1
+
+# Soft byte budget for the shared store. Enforced once per authoring run (not per put), so old
+# results are trimmed as new analyses accumulate across sessions. A cap, not a hard limit.
+SHARED_CACHE_MAX_BYTES = 512 * 1024 * 1024
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -43,6 +62,9 @@ class CacheStore:
         # parallelism in M2 will need per-thread connections + SQLITE_BUSY retry.
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # Shared store: a concurrent session may hold the write lock. Wait instead of raising
+        # SQLITE_BUSY — writes are a single idempotent INSERT OR IGNORE, so a short wait suffices.
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute(_SCHEMA)
         self._conn.commit()
 
@@ -75,6 +97,51 @@ class CacheStore:
         """Number of distinct results currently stored."""
         return self._conn.execute("SELECT COUNT(*) FROM results").fetchone()[0]
 
+    def clear(self) -> int:
+        """Drop every stored result. Returns the number of rows removed.
+
+        The purge path for the shared cross-session store: recovers from a poisoned entry (a
+        non-pure operator can persist a wrong result globally) and removes payload residue.
+        """
+        removed = self.row_count()
+        self._conn.execute("DELETE FROM results")
+        self._conn.commit()
+        return removed
+
+    def total_bytes(self) -> int:
+        """Total payload bytes currently stored (sum of ``byte_size``)."""
+        return self._conn.execute("SELECT COALESCE(SUM(byte_size), 0) FROM results").fetchone()[0]
+
+    def evict_to(self, max_bytes: int) -> int:
+        """Evict oldest results (by ``created_at``) until the total payload is ≤ ``max_bytes``.
+
+        Returns the number of rows removed. Correctness is never at stake — an evicted entry is
+        at worst a recompute; a running graph's within-run dependencies are held in the executor's
+        in-memory ``results``, never re-read from here. Cheap when already under budget (one SUM).
+        """
+        total = self.total_bytes()
+        if total <= max_bytes:
+            return 0
+        victims: list[str] = []
+        for fp, size in self._conn.execute(
+            "SELECT fingerprint, byte_size FROM results ORDER BY created_at ASC"
+        ).fetchall():
+            if total <= max_bytes:
+                break
+            victims.append(fp)
+            total -= size
+        if victims:
+            self._conn.executemany(
+                "DELETE FROM results WHERE fingerprint = ?", [(fp,) for fp in victims]
+            )
+            self._conn.commit()
+            logger.info(
+                "graph cache: evicted %d oldest result(s) to stay under %d bytes",
+                len(victims),
+                max_bytes,
+            )
+        return len(victims)
+
     def close(self) -> None:
         self._conn.close()
 
@@ -83,3 +150,19 @@ class CacheStore:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def shared_cache_path() -> Path:
+    """Path of the shared, cross-session result store under ``VIBE_HOME``.
+
+    Versioned by :data:`CACHE_VERSION` so an operator-semantics change starts a fresh file.
+    Imported lazily to avoid a ``paths → graph`` import cycle (paths must not import graph).
+    """
+    from vibe.core.paths import VIBE_HOME
+
+    return VIBE_HOME.path / f"graph-cache-v{CACHE_VERSION}.sqlite"
+
+
+def open_shared_cache() -> CacheStore:
+    """Open the shared cross-session cache (see :func:`shared_cache_path`)."""
+    return CacheStore(shared_cache_path())

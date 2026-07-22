@@ -2209,6 +2209,11 @@ class VibeApp(App):  # noqa: PLR0904
     async def _show_graph(self, cmd_args: str = "", **kwargs: Any) -> None:
         from vibe.core.graph import render
 
+        parts = cmd_args.split()
+        if parts and parts[0] == "cache":
+            await self._graph_cache_command(parts[1:])
+            return
+
         if self._current_bottom_app == BottomApp.Graph:
             return
 
@@ -2228,6 +2233,36 @@ class VibeApp(App):  # noqa: PLR0904
             f"Workflow graph — {len(views)} nodes", views, render.to_mermaid(graph, states)
         )
         await self._switch_from_input(panel)
+
+    async def _graph_cache_command(self, args: list[str]) -> None:
+        """`/graph cache` shows the shared cross-session cache size; `... clear --yes` purges it."""
+        from vibe.core.graph.cache import open_shared_cache, shared_cache_path
+
+        path = shared_cache_path()
+        if args and args[0] == "clear":
+            if "--yes" not in args:
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"Will clear the shared result cache at `{path}` (reused across all "
+                        "sessions). Re-run `/graph cache clear --yes` to confirm."
+                    )
+                )
+                return
+            with open_shared_cache() as cache:
+                removed = cache.clear()
+            await self._mount_and_scroll(
+                UserCommandMessage(f"Cleared {removed} cached result(s) from `{path}`.")
+            )
+            return
+
+        with open_shared_cache() as cache:
+            rows, size_mb = cache.row_count(), cache.total_bytes() / 1_000_000
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                f"## Shared result cache\n\n`{path}`\n\n{rows} result(s), {size_mb:.1f} MB "
+                "(reused across sessions). Purge with `/graph cache clear --yes`."
+            )
+        )
 
     async def _show_blocks(self, cmd_args: str = "", **kwargs: Any) -> None:
         from vibe.core.graph import render

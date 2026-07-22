@@ -422,3 +422,31 @@ async def test_ml_operators_run_and_are_seeded_deterministic() -> None:
 
     with pytest.raises(ValueError, match="model must be one of"):
         await A.ml_regression(t, target="revenue", features=["units"], model="nope")
+
+
+def test_enum_defaults_are_within_allowed() -> None:
+    # Narrowing guard (crit#1): every analysis enum op's default must be one of its Literal values,
+    # so annotating params as Literal never rejects a previously-valid default.
+    from vibe.core.graph.operators import registered_operators
+
+    for name, spec in registered_operators().items():
+        if spec.library != "analysis":
+            continue
+        for param, allowed in spec.allowed_values.items():
+            if param in spec.defaults and spec.defaults[param] is not None:
+                default = spec.defaults[param]
+                for v in default if isinstance(default, list) else [default]:
+                    assert v in allowed, f"{name}.{param} default {v!r} not in {allowed}"
+
+
+@pytest.mark.asyncio
+async def test_read_csv_and_fingerprint_expand_tilde(tmp_path, monkeypatch) -> None:
+    from vibe.core.graph.fingerprint import content_hash
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "d.csv").write_text("a,b\n1,x\n")
+    # The fingerprint autofill path (content_hash) and read_csv resolve ~ to the same file.
+    fp = content_hash("~/d.csv")
+    assert fp  # no OSError
+    t = await A.read_csv(path="~/d.csv", content_fp=fp)
+    assert t.columns == ["a", "b"] and t.rows == [{"a": 1, "b": "x"}]

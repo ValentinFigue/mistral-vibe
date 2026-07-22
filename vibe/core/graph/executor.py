@@ -24,7 +24,13 @@ from pydantic import BaseModel
 from vibe.core.graph.cache import CacheStore
 from vibe.core.graph.fingerprint import fingerprint_node
 from vibe.core.graph.model import Graph, NodeId, NodeState, Report, Value
-from vibe.core.graph.operators import OperatorSpec, get_operator
+from vibe.core.graph.operators import (
+    OperatorSpec,
+    coerce_value,
+    get_operator,
+    is_registered,
+    param_issues,
+)
 
 
 class GraphValidationError(Exception):
@@ -73,7 +79,27 @@ def validate(graph: Graph) -> None:
                 f"node {node.id!r} (op {node.op!r}) argument mismatch: "
                 f"missing={sorted(missing)} extra={sorted(extra)}"
             )
+        # Value-level checks: enum membership (with a "did you mean" hint) and param value types,
+        # so a bad value fails here with a clear message rather than mid-execution.
+        issues = param_issues(spec, node.params)
+        if issues:
+            raise GraphValidationError(f"node {node.id!r}: {issues[0]}")
     _topo_order(graph)  # raises GraphValidationError on a cycle
+
+
+def coerce_params(graph: Graph) -> None:
+    """Coerce each node's literal params toward the operator's declared types, in place — the
+    unambiguous slips only (numeric string↔number, ``"true"/"false"``→bool, number→str, scalar→list;
+    see :func:`vibe.core.graph.operators.coerce_value`). Run before ``validate``/fingerprinting so
+    the cache key reflects the coerced values and stays stable across turns. Deterministic.
+    """
+    for node in graph.nodes.values():
+        if not is_registered(node.op):
+            continue
+        spec = get_operator(node.op)
+        for key in list(node.params):
+            if key not in spec.input_names and key in spec.param_types:
+                node.params[key] = coerce_value(node.params[key], spec.param_types[key])
 
 
 def _topo_order(graph: Graph) -> list[NodeId]:
@@ -137,6 +163,7 @@ async def execute(
 
         graph, _ = expand(graph)
 
+    coerce_params(graph)  # normalize unambiguous type slips (e.g. scalar→list) before validating
     validate(graph)
 
     indegree = {nid: len(node.inputs) for nid, node in graph.nodes.items()}

@@ -25,8 +25,12 @@ def content_hash(path: str | Path) -> str:
     file changes the node's fingerprint (the purity discipline made concrete). Source
     nodes are the one place fingerprinting must touch the filesystem; a stat-based
     (mtime+size) fast path is a possible later optimization.
+
+    ``~`` is expanded (``expanduser``) so a home-relative path hashes the same file the
+    reading operator opens — the loaders (``read_csv`` etc.) expand it too, keeping the
+    fingerprint and the read in lockstep.
     """
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
 
 
 def fingerprint_node(

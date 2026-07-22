@@ -20,7 +20,10 @@ read_csv(path="orders.csv")
 ```
 
 - A step is `op(key=value, …)` — an operator or block from the **Workflow catalog** (below in
-  this prompt). Reference only names it lists.
+  this prompt). Reference only names it lists. **Match each param's declared type and allowed
+  values** as the catalog shows them: quote strings, leave numbers unquoted (`n=10`, not `n="10"`),
+  wrap list params in `[...]`, and for an enum like `model:logreg|tree|rf` use exactly one of the
+  listed values (e.g. `tree`, not `decision_tree`).
 - `|` feeds the previous step's table into the next step's first input. You may spread a pipeline
   across lines (put each `| step` on its own line, as above) — it reads the same as one line.
 - **Wrap every SQL query in triple quotes** `sql(query="""…""")`. SQL is full of quotes and

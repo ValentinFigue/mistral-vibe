@@ -234,8 +234,10 @@ def operators_catalog(
 ) -> str:
     """The operator + block catalog, as markdown.
 
-    Compact (``verbose=False``, used by the agent catalog on every patch result) shows arg
-    types but no descriptions; verbose (used by ``/operators``) adds the one-line description.
+    Each param renders as ``name:type[=default]``; for enum params the type is the allowed values
+    (e.g. ``model:logreg|tree|rf``) since they're annotated ``Literal[...]``. ``verbose=True`` (used
+    by the agent catalog and ``/operators``) appends each op's one-line description; ``verbose=False``
+    omits it.
     """
     lines = ["Available operators (inputs are wired from nodes; params are literals):"]
     for name, spec in sorted(operators.items()):

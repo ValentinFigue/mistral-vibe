@@ -95,3 +95,19 @@ async def test_run_pipeline_catalog_shown_once(tmp_path: Path) -> None:
     assert first is not None and "read_csv" in first  # full catalog on the first turn
     second = tool.get_llm_content(r1)
     assert second is not None and "read_csv" not in second and "catalog unchanged" in second
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_rejects_bad_enum_value(tmp_path: Path) -> None:
+    # An invalid enum value fails at validate-time with the allowed list (not a mid-run error).
+    prog = 'sample_dataset(name="sales") | filter_rows(column="region", value="x", op="equals")'
+    with pytest.raises(ToolError, match="must be one of"):
+        await _run(_tool(), prog, _ctx(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_coerces_quoted_number(tmp_path: Path) -> None:
+    # n="3" (a quoted number) is coerced to int 3, so the program runs instead of failing.
+    prog = 'sample_dataset(name="sales") | top_n(by="revenue", n="3") | to_markdown()'
+    result = await _run(_tool(), prog, _ctx(tmp_path))
+    assert result.applied and len(result.fresh) + len(result.cached) == 3

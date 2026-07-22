@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
-from vibe.core.graph.operators import get_operator, operator
+from vibe.core.graph.operators import coerce_value, get_operator, operator, param_issues
 
 
 class _Row(BaseModel):
@@ -74,3 +76,44 @@ def test_reads_file_must_be_a_param() -> None:
         @operator(name="tst_bad_reads", reads_file="missing")
         async def _bad(x: _Row) -> _Agg:
             return _Agg(n=x.v)
+
+
+@operator(name="tst_enum")
+async def _enum(
+    x: _Row,
+    mode: Literal["fast", "slow"] = "fast",
+    tags: list[Literal["a", "b"]] | None = None,
+    n: int = 1,
+) -> _Agg:
+    """Op with an enum, a list-enum, and an int param."""
+    return _Agg(n=x.v)
+
+
+def test_literal_enum_metadata_and_rendering() -> None:
+    spec = get_operator("tst_enum")
+    # Literal renders as the allowed values in the catalog string, and is extracted structurally.
+    assert spec.arg_types["mode"] == "fast|slow"
+    assert spec.allowed_values["mode"] == ("fast", "slow")
+    assert spec.allowed_values["tags"] == ("a", "b")  # Optional[list[Literal]] unwrapped
+    assert spec.defaults["mode"] == "fast" and spec.defaults["mode"] in spec.allowed_values["mode"]
+    assert "mode" in spec.param_types  # structured type kept for coercion/checks
+
+
+def test_param_issues_enum_type_and_hint() -> None:
+    spec = get_operator("tst_enum")
+    bad = param_issues(spec, {"mode": "medium"})
+    assert bad and "must be one of fast|slow" in bad[0] and "medium" in bad[0]
+    assert "did you mean 'slow'" in param_issues(spec, {"mode": "sl0w"})[0]  # close typo → hint
+    assert param_issues(spec, {"tags": ["a", "z"]})  # list-enum element checked
+    assert any("expected int" in i for i in param_issues(spec, {"n": "abc"}))
+    assert param_issues(spec, {"mode": "fast", "tags": ["a"], "n": 3}) == []  # all valid
+
+
+def test_coerce_value_safe_cases() -> None:
+    assert coerce_value("10", int) == 10
+    assert coerce_value("0.9", float) == 0.9
+    assert coerce_value("true", bool) is True
+    assert coerce_value(5, str) == "5"
+    assert coerce_value("country", list[str]) == ["country"]  # scalar → one-element list
+    assert coerce_value(["a", "b"], list[str]) == ["a", "b"]
+    assert coerce_value("abc", int) == "abc"  # non-numeric: left for validate to reject

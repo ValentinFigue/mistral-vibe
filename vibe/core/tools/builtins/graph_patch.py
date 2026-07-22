@@ -36,7 +36,12 @@ from vibe.core.graph.cache import SHARED_CACHE_MAX_BYTES, CacheStore, open_share
 # generic `graph` agent. A real deployment would register its own libraries at startup.
 import vibe.core.graph.demo.blocks  # noqa: F401  (weekly-margin pipeline + blocks)
 import vibe.core.graph.demo.research  # noqa: F401
-from vibe.core.graph.executor import GraphValidationError, execute, validate
+from vibe.core.graph.executor import (
+    GraphValidationError,
+    coerce_params,
+    execute,
+    validate,
+)
 from vibe.core.graph.fingerprint import content_hash
 import vibe.core.graph.library.analysis  # noqa: F401  (data-analysis operator kit + blocks)
 from vibe.core.graph.model import Graph, NodeId, Patch, Value
@@ -268,12 +273,17 @@ def _visible(item_library: str | None, agent_library: str | None) -> bool:
 
 
 def _render_catalog(library: str | None = None) -> str:
-    """Compact operator + block catalog injected into each result, scoped to ``library``."""
+    """Operator + block catalog injected into each result, scoped to ``library``.
+
+    ``verbose=True`` so each op carries its one-line description — combined with the enum values now
+    in ``arg_types`` (via ``Literal``), the agent sees each param's type, default, allowed values,
+    and purpose, which is what it needs to author valid nodes.
+    """
     from vibe.core.graph import render
 
     ops = {n: s for n, s in registered_operators().items() if _visible(s.library, library)}
     blocks = {n: b for n, b in registered_blocks().items() if _visible(b.library, library)}
-    return render.operators_catalog(ops, blocks, verbose=False)
+    return render.operators_catalog(ops, blocks, verbose=True)
 
 
 def _enforce_library(graph: Graph, library: str | None) -> None:
@@ -308,6 +318,7 @@ async def build_result(
     GraphPatch._autofill_content_fp(new)
     try:
         expanded, fold = expand(new)
+        coerce_params(expanded)  # fix unambiguous type slips before fingerprint/validate
         validate(expanded)
     except (GraphValidationError, BlockError, KeyError) as exc:
         raise ToolError(f"invalid graph: {exc}") from exc

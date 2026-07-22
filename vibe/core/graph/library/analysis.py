@@ -23,12 +23,13 @@ small handle, keeping bytes out of context.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import csv
 from datetime import date, datetime
 import importlib.resources
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -79,8 +80,11 @@ def _table(columns: list[str], rows: list[dict[str, Any]]) -> Table:
     return Table(columns=cols, rows=[{c: r.get(c) for c in cols} for r in rows])
 
 
-def _cols(value: list[str] | str | None) -> list[str]:
-    """Accept a single column name, a list, or None — a bare string is one column, not chars."""
+def _cols(value: Sequence[str] | str | None) -> list[str]:
+    """Accept a single column name, a sequence, or None — a bare string is one column, not chars.
+
+    Takes a covariant ``Sequence`` so enum lists (``list[Literal[...]]``) are accepted too.
+    """
     if value is None:
         return []
     return [value] if isinstance(value, str) else list(value)
@@ -224,7 +228,7 @@ async def rename_columns(table: Table, mapping: dict[str, str]) -> Table:
 
 
 @operator(library=_LIB)
-async def cast_column(table: Table, column: str, type: str) -> Table:
+async def cast_column(table: Table, column: str, type: Literal["int", "float", "str"]) -> Table:
     """Cast a column to ``int``, ``float``, or ``str`` (blank/invalid → None for numerics)."""
     _need(table, column)
     if type not in {"int", "float", "str"}:
@@ -267,7 +271,12 @@ def _compare(cell: Any, op: str, value: Any) -> bool:
 
 
 @operator(library=_LIB)
-async def filter_rows(table: Table, column: str, value: str, op: str = "==") -> Table:
+async def filter_rows(
+    table: Table,
+    column: str,
+    value: str,
+    op: Literal["==", "!=", ">", ">=", "<", "<=", "contains"] = "==",
+) -> Table:
     """Keep rows where ``column`` ``op`` ``value``. op ∈ ==, !=, >, >=, <, <=, contains."""
     _need(table, column)
     valid = ("==", "!=", ">", ">=", "<", "<=", "contains")
@@ -320,7 +329,9 @@ async def distinct(table: Table, columns: list[str] | None = None) -> Table:
 
 
 @operator(library=_LIB)
-async def derive_column(table: Table, name: str, left: str, op: str, right: str) -> Table:
+async def derive_column(
+    table: Table, name: str, left: str, op: Literal["+", "-", "*", "/"], right: str
+) -> Table:
     """Add ``name`` = ``left`` <op> ``right`` (op ∈ +,-,*,/). ``right`` is a numeric constant or
     another column name.
     """
@@ -348,7 +359,9 @@ async def derive_column(table: Table, name: str, left: str, op: str, right: str)
 
 
 @operator(library=_LIB)
-async def date_part(table: Table, column: str, part: str) -> Table:
+async def date_part(
+    table: Table, column: str, part: Literal["year", "month", "day", "weekday"]
+) -> Table:
     """Add a column ``{column}_{part}`` extracted from an ISO date. part ∈ year, month, day,
     weekday.
     """
@@ -377,7 +390,7 @@ async def date_part(table: Table, column: str, part: str) -> Table:
 
 
 @operator(library=_LIB)
-async def join(left: Table, right: Table, on: str, how: str = "inner") -> Table:
+async def join(left: Table, right: Table, on: str, how: Literal["inner", "left"] = "inner") -> Table:
     """Join two tables on a shared column (a real SQL join via pandas). how ∈ inner, left.
 
     Unlike a lookup, duplicate keys on either side multiply matching rows (standard join
@@ -418,7 +431,12 @@ async def sql(query: str, t1: Table, t2: Table | None = None, t3: Table | None =
 
 
 @operator(library=_LIB)
-async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str] | None = None) -> Table:
+async def group_by(
+    table: Table,
+    keys: list[str],
+    metric: str,
+    aggs: list[Literal["sum", "mean", "min", "max", "count"]] | None = None,
+) -> Table:
     """Group by ``keys`` (empty → overall total) and aggregate ``metric``. aggs ⊆ sum, mean, min,
     max, count (default ["sum"]). Output columns: keys + one per agg (``count`` is a row count).
 
@@ -428,12 +446,12 @@ async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str] |
     import pandas as pd
 
     keys = _cols(keys)
-    aggs = _cols(aggs) or ["sum"]
+    agg_list = _cols(aggs) or ["sum"]
     _need(table, *keys)
-    unknown = [a for a in aggs if a not in {*_NUMERIC_AGGS, "count"}]
+    unknown = [a for a in agg_list if a not in {*_NUMERIC_AGGS, "count"}]
     if unknown:
         raise ValueError(f"group_by: unknown aggs {unknown}; use sum/mean/min/max/count")
-    numeric = [a for a in aggs if a != "count"]
+    numeric = [a for a in agg_list if a != "count"]
     if numeric:
         _require_numeric(table, metric, "group_by")
 
@@ -441,7 +459,7 @@ async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str] |
 
     def agg_row(sub: Any) -> dict[str, Any]:
         row: dict[str, Any] = {}
-        if "count" in aggs:
+        if "count" in agg_list:
             row["count"] = int(len(sub))
         series = pd.to_numeric(sub[metric], errors="coerce").dropna() if numeric else None
         for a in numeric:
@@ -458,7 +476,7 @@ async def group_by(table: Table, keys: list[str], metric: str, aggs: list[str] |
     else:
         out_rows.append(agg_row(df))
 
-    out_cols = [*keys, *(("count",) if "count" in aggs else ()), *(f"{metric}_{a}" for a in numeric)]
+    out_cols = [*keys, *(("count",) if "count" in agg_list else ()), *(f"{metric}_{a}" for a in numeric)]
     return _from_df(pd.DataFrame(out_rows, columns=out_cols))
 
 
@@ -515,7 +533,13 @@ async def top_n(table: Table, by: str, n: int = 10) -> Table:
 
 
 @operator(library=_LIB)
-async def pivot(table: Table, index: str, columns: str, values: str, aggfunc: str = "sum") -> Table:
+async def pivot(
+    table: Table,
+    index: str,
+    columns: str,
+    values: str,
+    aggfunc: Literal["sum", "mean", "min", "max", "count"] = "sum",
+) -> Table:
     """Long→wide: one row per ``index``, one column per distinct ``columns`` value, cells are
     ``aggfunc`` of ``values``. aggfunc ∈ sum, mean, min, max, count.
     """
@@ -554,7 +578,12 @@ async def concat(top: Table, bottom: Table) -> Table:
 
 
 @operator(library=_LIB)
-async def fill_missing(table: Table, column: str, method: str = "value", value: Any = None) -> Table:
+async def fill_missing(
+    table: Table,
+    column: str,
+    method: Literal["value", "mean", "median", "ffill", "bfill"] = "value",
+    value: Any = None,
+) -> Table:
     """Fill missing values in ``column``. method ∈ value, mean, median, ffill, bfill."""
     import pandas as pd
 
@@ -575,7 +604,13 @@ async def fill_missing(table: Table, column: str, method: str = "value", value: 
 
 
 @operator(library=_LIB)
-async def rank(table: Table, by: str, name: str = "rank", descending: bool = True, method: str = "dense") -> Table:
+async def rank(
+    table: Table,
+    by: str,
+    name: str = "rank",
+    descending: bool = True,
+    method: Literal["dense", "min", "first", "average"] = "dense",
+) -> Table:
     """Add a ``name`` column ranking rows by ``by`` (1 = top). method ∈ dense, min, first, average."""
     import pandas as pd
 
@@ -626,7 +661,13 @@ async def pct_change(table: Table, column: str, name: str | None = None) -> Tabl
 
 
 @operator(library=_LIB)
-async def rolling(table: Table, column: str, window: int, name: str | None = None, stat: str = "mean") -> Table:
+async def rolling(
+    table: Table,
+    column: str,
+    window: int,
+    name: str | None = None,
+    stat: Literal["mean", "sum", "min", "max"] = "mean",
+) -> Table:
     """Rolling-window ``stat`` over a numeric ``column`` (adds ``{column}_rolling_{stat}``).
     stat ∈ mean, sum, min, max.
     """
@@ -732,8 +773,8 @@ async def ml_regression(
     table: Table,
     target: str,
     features: list[str],
-    model: str = "linear",
-    metric: str = "r2",
+    model: Literal["linear", "ridge", "tree", "rf"] = "linear",
+    metric: Literal["r2", "rmse", "mae"] = "r2",
     test_size: float = 0.2,
     seed: int = 0,
 ) -> Table:
@@ -778,8 +819,8 @@ async def ml_classification(
     table: Table,
     target: str,
     features: list[str],
-    model: str = "logreg",
-    metric: str = "accuracy",
+    model: Literal["logreg", "tree", "rf"] = "logreg",
+    metric: Literal["accuracy", "f1"] = "accuracy",
     test_size: float = 0.2,
     seed: int = 0,
 ) -> Table:
@@ -818,7 +859,11 @@ async def ml_classification(
 
 @operator(library=_LIB)
 async def ml_cluster(
-    table: Table, features: list[str], k: int, metric: str = "silhouette", seed: int = 0
+    table: Table,
+    features: list[str],
+    k: int,
+    metric: Literal["silhouette", "inertia"] = "silhouette",
+    seed: int = 0,
 ) -> Table:
     """K-means over ``features`` (categoricals one-hot encoded, missing rows dropped) — a 1×1 table
     (``score``): ``silhouette`` (cohesion/separation, higher is better) or ``inertia``.

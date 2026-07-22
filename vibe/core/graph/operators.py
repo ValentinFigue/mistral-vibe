@@ -15,9 +15,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+import difflib
 import inspect
 import types
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel
 
@@ -44,6 +45,8 @@ class OperatorSpec:
     library: str | None = None  # catalog-scoping tag; None = untagged (generic/kitchen-sink)
     reads_file: str | None = None  # name of a path param whose file content is fingerprinted
     defaults: dict[str, Any] = field(default_factory=dict)  # params with a signature default (optional)
+    allowed_values: dict[str, tuple[str, ...]] = field(default_factory=dict)  # enum params (Literal)
+    param_types: dict[str, Any] = field(default_factory=dict)  # arg name -> resolved annotation
 
     def literal_names(self) -> tuple[str, ...]:
         return tuple(p for p in self.param_names if p not in self.input_names)
@@ -63,12 +66,33 @@ def _readable_type(annotation: Any) -> str:
     if isinstance(annotation, type):
         return annotation.__name__
     origin = get_origin(annotation)
+    if origin is Literal:  # Literal["a", "b"] → "a|b" (the agent sees the allowed values)
+        return "|".join(str(a) for a in get_args(annotation))
     if origin in {Union, types.UnionType}:  # X | Y → "X|Y"
         return "|".join(_readable_type(a) for a in get_args(annotation))
     if origin is not None:
         inner = ", ".join(_readable_type(a) for a in get_args(annotation))
         return f"{getattr(origin, '__name__', str(origin))}[{inner}]" if inner else str(origin)
     return str(annotation)
+
+
+def _allowed_values(annotation: Any) -> tuple[str, ...] | None:
+    """Allowed values for a ``Literal[...]``, ``list[Literal[...]]``, or an ``Optional`` of either,
+    else ``None``. For a list-enum the values apply per element (checked element-wise by the caller).
+    """
+    origin = get_origin(annotation)
+    if origin in {Union, types.UnionType}:  # unwrap Optional[...] / X | None
+        for a in get_args(annotation):
+            if a is not type(None) and (av := _allowed_values(a)) is not None:
+                return av
+        return None
+    if origin is Literal:
+        return tuple(str(a) for a in get_args(annotation))
+    if origin in _COLLECTION_ORIGINS:
+        args = get_args(annotation)
+        if args and get_origin(args[0]) is Literal:
+            return tuple(str(a) for a in get_args(args[0]))
+    return None
 
 
 def _is_input_annotation(annotation: Any) -> bool:
@@ -127,6 +151,10 @@ def operator(
 
         input_names = tuple(p for p in params if _is_input_annotation(hints.get(p)))
         arg_types = {p: _readable_type(hints[p]) for p in params if p in hints}
+        param_types = {p: hints[p] for p in params if p in hints}
+        allowed_values = {
+            p: av for p in params if p in hints and (av := _allowed_values(hints[p])) is not None
+        }
         doc = (fn.__doc__ or "").strip()
         description = doc.splitlines()[0].strip() if doc else ""
         _REGISTRY[op_name] = OperatorSpec(
@@ -140,6 +168,8 @@ def operator(
             library=library,
             reads_file=reads_file,
             defaults=defaults,
+            allowed_values=allowed_values,
+            param_types=param_types,
         )
         return fn
 
@@ -161,3 +191,125 @@ def is_registered(name: str) -> bool:
 def registered_operators() -> dict[str, OperatorSpec]:
     """A snapshot of all registered operators (for catalogs shown to the agent)."""
     return dict(_REGISTRY)
+
+
+# --- param coercion + value checks (used by the executor's validate / the tools' coerce pass) ---
+
+
+def _strip_optional(annotation: Any) -> Any:
+    """Unwrap ``X | None`` to ``X`` when there's a single non-None member; else return as-is."""
+    if get_origin(annotation) in {Union, types.UnionType}:
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            return non_none[0]
+    return annotation
+
+
+def _to_int(val: Any) -> Any:
+    if isinstance(val, (bool, int)):
+        return val
+    if isinstance(val, float) and val.is_integer():
+        return int(val)
+    if isinstance(val, str):
+        try:
+            return int(val.strip())
+        except ValueError:
+            return val
+    return val
+
+
+def _to_float(val: Any) -> Any:
+    if isinstance(val, (bool, int, float)):
+        return val
+    if isinstance(val, str):
+        try:
+            return float(val.strip())
+        except ValueError:
+            return val
+    return val
+
+
+def _to_bool(val: Any) -> Any:
+    if isinstance(val, str) and val.strip().lower() in {"true", "false"}:
+        return val.strip().lower() == "true"
+    return val
+
+
+_COERCERS: dict[type, Callable[[Any], Any]] = {int: _to_int, float: _to_float, bool: _to_bool}
+
+
+def _coerce_scalar(val: Any, ann: Any) -> Any:
+    """Best-effort coercion of one scalar toward ``ann``; returns ``val`` unchanged if unsafe."""
+    if get_origin(ann) is Literal:  # enum domain is strings; membership checked separately
+        return val if isinstance(val, str) else str(val)
+    if ann in _COERCERS:
+        return _COERCERS[ann](val)
+    if ann is str and isinstance(val, (int, float, bool)):
+        return str(val)
+    return val
+
+
+def coerce_value(val: Any, annotation: Any) -> Any:
+    """Coerce ``val`` toward ``annotation`` for the *unambiguous* slips only (numeric string↔number,
+    ``"true"/"false"``→bool, number→str, and a scalar→one-element list where a list is expected).
+    Anything else is returned unchanged for :func:`param_issues` to type-check.
+    """
+    ann = _strip_optional(annotation)
+    if get_origin(ann) in _COLLECTION_ORIGINS:
+        inner = next(iter(get_args(ann)), str)
+        items = val if isinstance(val, list) else [val]  # scalar → [scalar]
+        return [_coerce_scalar(v, inner) for v in items]
+    return _coerce_scalar(val, ann)
+
+
+# int is an acceptable float; bool is neither an int nor a float here (a distinct kind).
+_PRIMITIVE_CHECKS: dict[type, Callable[[Any], bool]] = {
+    float: lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    int: lambda v: isinstance(v, int) and not isinstance(v, bool),
+    bool: lambda v: isinstance(v, bool),
+    str: lambda v: isinstance(v, str),
+}
+
+
+def _type_ok(val: Any, annotation: Any) -> bool:
+    """Whether ``val`` matches ``annotation`` (post-coercion). ``Any``/unknown annotations pass."""
+    if val is None:
+        return get_origin(annotation) in {Union, types.UnionType} and type(None) in get_args(annotation)
+    ann = _strip_optional(annotation)
+    origin = get_origin(ann)
+    if origin is Literal:
+        return isinstance(val, str)  # membership handled by allowed_values
+    if origin in _COLLECTION_ORIGINS:
+        inner = next(iter(get_args(ann)), None)
+        return isinstance(val, list) and (inner is None or all(_type_ok(v, inner) for v in val))
+    if ann in _PRIMITIVE_CHECKS:
+        return _PRIMITIVE_CHECKS[ann](val)
+    if isinstance(ann, type):
+        return isinstance(val, ann)
+    return True  # Any / unresolved → don't enforce
+
+
+def param_issues(spec: OperatorSpec, params: dict[str, Any]) -> list[str]:
+    """Human-readable problems with a node's literal params: invalid enum values (with a
+    'did you mean' hint) and wrong value types. Empty list means the params are acceptable.
+    """
+    issues: list[str] = []
+    for key, val in params.items():
+        if key in spec.input_names or key not in spec.param_types:
+            continue
+        allowed = spec.allowed_values.get(key)
+        if allowed is not None:
+            for v in (val if isinstance(val, list) else [val]):
+                if v not in allowed:
+                    match = difflib.get_close_matches(str(v), allowed, n=1)
+                    hint = f" — did you mean {match[0]!r}?" if match else ""
+                    issues.append(
+                        f"{spec.name}: {key} must be one of {'|'.join(allowed)}, got {v!r}{hint}"
+                    )
+            continue  # enum params are strings; skip the generic type check
+        if not _type_ok(val, spec.param_types[key]):
+            issues.append(
+                f"{spec.name}: {key} expected {_readable_type(spec.param_types[key])}, "
+                f"got {type(val).__name__} ({val!r})"
+            )
+    return issues

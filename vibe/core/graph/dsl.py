@@ -24,7 +24,9 @@ from vibe.core.graph.blocks import get_block, is_block
 from vibe.core.graph.model import Graph, Node
 from vibe.core.graph.operators import get_operator, is_registered
 
-_ASSIGN_RE = re.compile(r"^([A-Za-z_]\w*)\s*=\s*(.*)$")
+# DOTALL so `.*` spans newlines — a `name = …` whose body holds a multi-line sql(query=\"\"\"…\"\"\")
+# still matches (without it, `$` fails mid-string and the assignment is mis-parsed as a call).
+_ASSIGN_RE = re.compile(r"^([A-Za-z_]\w*)\s*=\s*(.*)$", re.DOTALL)
 _CALL_RE = re.compile(r"^([A-Za-z_]\w*)\s*\((.*)\)$", re.DOTALL)
 _IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 
@@ -86,13 +88,15 @@ def _split_top_level(text: str, sep: str) -> list[str]:
 
 
 def _scan_lines(text: str) -> list[str]:
-    """Split ``text`` into lines at newlines **outside** any quoted string, stripping ``#`` comments.
+    """Split ``text`` into logical lines at newlines outside any string AND at bracket depth 0.
 
-    A newline inside a quoted string (a multi-line ``sql(query=\"\"\"…\"\"\")``) does not end a line;
-    a ``#`` outside a string starts a comment to end of line. Raises on an unterminated string.
+    A newline inside a quoted string (a multi-line ``sql(query=\"\"\"…\"\"\")``) or inside an open
+    ``(``/``[``/``{`` (a call whose args span lines) does not end a line — a multi-line ``op(...)``
+    stays one statement. A ``#`` at depth 0 starts a comment. Raises on an unterminated string.
     """
     lines: list[str] = []
     quote: str | None = None
+    depth = 0  # open ( [ { — a newline inside a call/list keeps the statement going
     buf: list[str] = []
     i, n = 0, len(text)
     while i < n:
@@ -113,12 +117,23 @@ def _scan_lines(text: str) -> list[str]:
             quote = text[i : i + 3] if text[i : i + 3] in {'"""', "'''"} else ch
             buf.append(quote)
             i += len(quote)
-        elif ch == "#":  # line comment (outside a string) — skip to the newline, keep the newline
+        elif ch in "([{":
+            depth += 1
+            buf.append(ch)
+            i += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+            i += 1
+        elif ch == "#" and depth == 0:  # line comment (outside a string) — skip to the newline
             while i < n and text[i] != "\n":
                 i += 1
         elif ch == "\n":
-            lines.append("".join(buf))
-            buf = []
+            if depth == 0:
+                lines.append("".join(buf))
+                buf = []
+            else:
+                buf.append(" ")  # newline inside a call → whitespace; statement continues
             i += 1
         else:
             buf.append(ch)
@@ -156,11 +171,18 @@ def _statements(text: str) -> list[str]:
     return statements
 
 
+# Tools the analyst calls on their own — not pipeline operators. Named here only to give a clear
+# hint when one is mistakenly used as a step (the DSL itself knows nothing about tools).
+_STANDALONE_TOOLS = frozenset({"graph_inspect", "graph_save_block", "ask_user_question"})
+
+
 def _input_ports(op: str) -> tuple[str, ...]:
     if is_block(op):
         return tuple(get_block(op).input_ports)
     if is_registered(op):
         return get_operator(op).input_names
+    if op in _STANDALONE_TOOLS:
+        raise DSLError(f"{op!r} is a separate tool — call it on its own, not as a pipeline step")
     raise DSLError(f"unknown operator or block {op!r}")
 
 
@@ -185,6 +207,8 @@ def _parse_call(segment: str) -> tuple[str, list[tuple[str, str]]]:
     kwargs: list[tuple[str, str]] = []
     if argstr:
         for arg in _split_top_level(argstr, ","):
+            if not arg.strip():  # tolerate a trailing (or doubled) comma
+                continue
             key, sep, val = arg.partition("=")
             if not sep or not _IDENT_RE.match(key.strip()):
                 raise DSLError(f"argument must be `key=value` in {op!r}, got {arg.strip()!r}")

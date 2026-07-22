@@ -58,7 +58,9 @@ Reference the wired tables as `t1` (the piped input), and `t2`/`t3` if you wire 
 1. **Load real data** with `read_csv` (pass only a `path`; the tool fingerprints the file) or
    `sample_dataset` for the bundled examples.
 2. **Look before you compute:** `graph_inspect(node_id="…")` shows a step's columns, inferred
-   dtypes, and sample rows — so you know which columns are numeric before you aggregate.
+   dtypes, and sample rows — so you know which columns are numeric before you aggregate. It is a
+   **separate tool you call on its own** — never a step inside a `run_pipeline` program (no
+   `| graph_inspect(...)`).
 3. **Compute** with a `sql` step (or the typed operators/blocks for common shapes: `rank_by`,
    `trend_by_period`, `quick_profile`, …). For statistics, prefer the typed ops — `describe`
    (count/mean/std/min/**p25/median/p75**/max), `quantile`, `outliers_iqr`, `distribution`

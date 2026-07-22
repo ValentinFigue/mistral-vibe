@@ -94,6 +94,14 @@ _REALISTIC_PROGRAMS = [
     'sample_dataset(name="sales") | rank_by(group_key="country", metric="revenue", n=3, title="T")',
     # list + int params; a pure sink terminal
     'read_csv(path="x.csv") | expect_columns(columns=["a", "b"]) | to_csv(path="out.csv")',
+    # a single op(...) call whose arguments span multiple lines (newlines inside the parens)
+    'read_csv(path="x.csv")\n'
+    "  | group_by(\n"
+    '        keys=["country"],\n'
+    '        metric="revenue",\n'
+    '        aggs=["sum"],\n'
+    "    )\n"
+    "  | to_markdown()",
     # alias assignment (`metrics = raw`) then reuse — the live `metrics = raw` failure
     'raw = read_csv(path="x.csv") | sql(query="""SELECT 1 AS a""")\n'
     "metrics = raw\n"
@@ -101,6 +109,14 @@ _REALISTIC_PROGRAMS = [
     # dangling trailing `|` immediately followed by a new assignment (must not glue)
     'raw = read_csv(path="x.csv") |\n'
     "metrics = raw | to_markdown()",
+    # alias assignment whose piped continuation is a multi-line sql (newlines in the body must not
+    # break the `name = …` match — this is the live ML-scenario failure)
+    'data = read_csv(path="x.csv")\n'
+    "data_with_target = data\n"
+    '  | sql(query="""\n'
+    "      SELECT *, 1 AS target FROM t1\n"
+    '  """)\n'
+    "data_with_target | to_markdown()",
     # multi-assignment fan-out
     'a = sample_dataset(name="sales")\n'
     'b = a | filter_rows(column="channel", value="web")\n'
@@ -170,6 +186,8 @@ def test_literals_and_lists() -> None:
         ('to_markdown(title="x"', "expected `op"),
         ('sample_dataset(name="sales") || to_markdown()', "empty step"),  # double pipe
         ('| to_markdown()', "empty step"),  # leading pipe, nothing before
+        # a standalone tool used as a pipeline step → a clear "call it on its own" hint
+        ('sample_dataset(name="sales") | graph_inspect(node_id="s1")', "separate tool"),
     ],
 )
 def test_parse_errors(program: str, match: str) -> None:

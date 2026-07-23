@@ -535,3 +535,56 @@ async def test_describe_output_is_sql_selectable() -> None:
     assert {r["field"] for r in out.rows} == {"revenue", "cost"}
     corr = await A.correlation(t, columns=["revenue", "cost"])
     assert "field" in corr.columns and "column" not in corr.columns
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "call"),
+    [
+        ("scatter", lambda t, p: A.scatter(t, x="units", y="revenue", path=p)),
+        ("histogram", lambda t, p: A.histogram(t, column="revenue", path=p)),
+        ("box", lambda t, p: A.box(t, column="revenue", by="region", path=p)),
+        ("pie", lambda t, p: A.pie(t, labels="region", values="revenue", path=p)),
+        ("line", lambda t, p: A.line_chart(t, x="date", y="revenue", path=p, series="region")),
+    ],
+)
+async def test_chart_ops_write_png_and_return_handle(kind, call, tmp_path) -> None:
+    out = tmp_path / f"{kind}.png"
+    res = await call(await _sales(), str(out))
+    assert isinstance(res, A.ChartResult) and res.kind == kind
+    assert out.exists() and out.stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_heatmap_of_correlation(tmp_path) -> None:
+    corr = await A.correlation(await _sales(), columns=["units", "revenue", "cost"])
+    out = tmp_path / "hm.png"
+    res = await A.heatmap(corr, path=str(out))
+    assert res.kind == "heatmap" and out.exists()
+
+
+@pytest.mark.asyncio
+async def test_chart_bad_axis_errors(tmp_path) -> None:
+    # a non-numeric axis on a numeric-only chart fails with a clear, column-naming error
+    with pytest.raises(ValueError, match="not numeric"):
+        await A.scatter(await _sales(), x="region", y="revenue", path=str(tmp_path / "x.png"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+async def test_feature_importance_ranks_and_aggregates() -> None:
+    pytest.importorskip("sklearn")
+    t = await _sales()
+    fi = await A.feature_importance(
+        t, target="region", features=["revenue", "units", "cost", "product"], model="rf"
+    )
+    assert fi.columns == ["field", "importance"]
+    # one-hot columns (product_*) are summed back to the source feature the caller named
+    assert {r["field"] for r in fi.rows} == {"revenue", "units", "cost", "product"}
+    imps = [r["importance"] for r in fi.rows]
+    assert imps == sorted(imps, reverse=True)  # ranked
+    # a numeric target auto-infers regression; linear on a class target is rejected clearly
+    reg = await A.feature_importance(t, target="revenue", features=["units", "cost"], model="linear")
+    assert {r["field"] for r in reg.rows} == {"units", "cost"}
+    with pytest.raises(ValueError, match="regression target"):
+        await A.feature_importance(t, target="region", features=["revenue"], model="linear")

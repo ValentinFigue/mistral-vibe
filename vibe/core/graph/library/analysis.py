@@ -907,6 +907,68 @@ async def ml_cluster(
     return _score_table(score)
 
 
+def _fi_estimator(model: str, task: str, seed: int):  # noqa: ANN202 (sklearn estimator, lazy)
+    from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+    from sklearn.linear_model import LinearRegression, LogisticRegression
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+
+    clf = task == "classification"
+    if model == "rf":
+        return (RandomForestClassifier if clf else RandomForestRegressor)(random_state=seed)
+    if model == "tree":
+        return (DecisionTreeClassifier if clf else DecisionTreeRegressor)(random_state=seed)
+    if model == "linear":
+        if clf:
+            raise ValueError("feature_importance: model 'linear' needs a regression target (use logreg/rf/tree)")
+        return LinearRegression()
+    if not clf:
+        raise ValueError("feature_importance: model 'logreg' needs a classification target (use linear/rf/tree)")
+    return LogisticRegression(max_iter=1000, random_state=seed)
+
+
+@operator(library=_LIB)
+async def feature_importance(
+    table: Table,
+    target: str,
+    features: list[str],
+    model: Literal["rf", "tree", "linear", "logreg"] = "rf",
+    task: Literal["auto", "classification", "regression"] = "auto",
+    seed: int = 0,
+) -> Table:
+    """Rank ``features`` by how much they predict ``target`` — a table of ``field, importance``
+    (descending). rf/tree use impurity importances, linear/logreg use ``|coef|``. ``task=auto``
+    infers regression for a numeric target, else classification. One-hot columns are summed back to
+    their source feature, so the ranking is by the columns you named. Needs the ``[ml]`` extra.
+    """
+    _require_sklearn()
+    import numpy as np
+    import pandas as pd
+
+    feats = _cols(features)
+    resolved = task if task != "auto" else ("regression" if _column_is_numeric(table, target) else "classification")
+    x, y = _ml_xy(table, target, feats)
+    y_fit = pd.to_numeric(y, errors="coerce") if resolved == "regression" else y.astype("str")
+    est = _fi_estimator(model, resolved, seed)
+    est.fit(x, y_fit)
+    if hasattr(est, "feature_importances_"):
+        imp = np.abs(np.asarray(est.feature_importances_))
+    else:
+        coef = np.asarray(est.coef_)
+        imp = np.abs(coef).mean(axis=0) if coef.ndim > 1 else np.abs(coef)
+    # sum one-hot-encoded columns (`{feature}_{value}`) back to the source feature the agent named
+    totals = {f: 0.0 for f in feats}
+    for col, value in zip(x.columns, imp, strict=True):
+        src = next((f for f in feats if col == f or str(col).startswith(f + "_")), None)
+        if src is not None:
+            totals[src] += float(value)
+    rows = sorted(
+        ({"field": f, "importance": round(v, 4)} for f, v in totals.items()),
+        key=lambda r: r["importance"],
+        reverse=True,
+    )
+    return _table(["field", "importance"], rows)
+
+
 # --- insight (LLM-backed) ------------------------------------------------------------------
 # These ops call the session model via an executor-injected `llm` caller (reserved param). Results
 # are cached per recipe (goal/labels + input fingerprint), so a re-run is a cache hit — change the
@@ -938,7 +1000,9 @@ async def narrate(
     note = f"\n(showing first {max_rows} of {len(table.rows)} rows)" if truncated else ""
     prompt = (
         f"Interpret this table and write a concise, factual takeaway in 2-4 sentences.{focus}\n"
-        f"Use only what the data shows — do not invent numbers.\n\n{data_text}{note}"
+        "Ground every claim in the table: quote the exact figures and column names you cite, and "
+        "invent nothing — if the data doesn't show it, don't say it.\n\n"
+        f"{data_text}{note}"
     )
     text = await llm(prompt, system="You are a precise data analyst.", max_tokens=512)
     return Report(markdown=text.strip())
@@ -1050,27 +1114,25 @@ async def to_csv(table: Table, path: str) -> ExportResult:
     return ExportResult(path=str(p), rows=len(table.rows), columns=list(table.columns))
 
 
-async def _save_chart(kind: str, table: Table, x: str, y: str, path: str, title: str) -> ChartResult:
+def _mpl():  # noqa: ANN202 (matplotlib.pyplot + pandas, imported lazily)
+    """Lazy matplotlib (headless ``Agg``) + pyplot + pandas — kept out of module import for startup."""
     import matplotlib
 
     matplotlib.use("Agg")  # headless, deterministic; no display backend
     import matplotlib.pyplot as plt
     import pandas as pd
 
-    _need(table, x, y)
-    df = _to_df(table)
-    ys = pd.to_numeric(df[y], errors="coerce")
-    xs = df[x].astype("str")
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
+    return plt, pd
+
+
+def _save_fig(fig, path: str, kind: str) -> ChartResult:  # noqa: ANN001 (matplotlib Figure)
+    """Layout + write ``fig`` to a PNG at ``path`` (always closing it); return a small handle."""
+    import matplotlib.pyplot as plt
+
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
     try:
-        (ax.bar if kind == "bar" else ax.plot)(xs, ys)
-        ax.set_title(title)
-        ax.set_xlabel(x)
-        ax.set_ylabel(y)
-        fig.autofmt_xdate()
         fig.tight_layout()
-        p = Path(path).expanduser()
-        p.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(p)
     finally:
         plt.close(fig)
@@ -1080,13 +1142,141 @@ async def _save_chart(kind: str, table: Table, x: str, y: str, path: str, title:
 @operator(library=_LIB)
 async def bar_chart(table: Table, x: str, y: str, path: str, title: str = "Chart") -> ChartResult:
     """Render a bar chart (``x`` categories, numeric ``y``) to a PNG at ``path``; returns a handle."""
-    return await _save_chart("bar", table, x, y, path, title)
+    plt, pd = _mpl()
+    _need(table, x, y)
+    df = _to_df(table)
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
+    ax.bar(df[x].astype("str"), pd.to_numeric(df[y], errors="coerce"))
+    ax.set_title(title), ax.set_xlabel(x), ax.set_ylabel(y)
+    fig.autofmt_xdate()
+    return _save_fig(fig, path, "bar")
 
 
 @operator(library=_LIB)
-async def line_chart(table: Table, x: str, y: str, path: str, title: str = "Chart") -> ChartResult:
-    """Render a line chart (``x`` vs numeric ``y``) to a PNG at ``path``; returns a handle."""
-    return await _save_chart("line", table, x, y, path, title)
+async def line_chart(
+    table: Table, x: str, y: str, path: str, title: str = "Chart", series: str = ""
+) -> ChartResult:
+    """Render a line chart (``x`` vs numeric ``y``) to a PNG at ``path``; returns a handle.
+
+    Set ``series`` to a column to draw one line per distinct value (a multi-series chart).
+    """
+    plt, pd = _mpl()
+    _need(table, x, y)
+    df = _to_df(table)
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
+    if series:
+        _need(table, series)
+        for key, grp in df.groupby(series):
+            ax.plot(grp[x].astype("str"), pd.to_numeric(grp[y], errors="coerce"), label=str(key))
+        ax.legend(title=series)
+    else:
+        ax.plot(df[x].astype("str"), pd.to_numeric(df[y], errors="coerce"))
+    ax.set_title(title), ax.set_xlabel(x), ax.set_ylabel(y)
+    fig.autofmt_xdate()
+    return _save_fig(fig, path, "line")
+
+
+@operator(library=_LIB)
+async def scatter(table: Table, x: str, y: str, path: str, title: str = "") -> ChartResult:
+    """Scatter plot of numeric ``x`` vs numeric ``y`` to a PNG at ``path``; returns a handle."""
+    plt, pd = _mpl()
+    _require_numeric(table, x, "scatter")
+    _require_numeric(table, y, "scatter")
+    df = _to_df(table)
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
+    ax.scatter(pd.to_numeric(df[x], errors="coerce"), pd.to_numeric(df[y], errors="coerce"), alpha=0.7)
+    ax.set_title(title or f"{y} vs {x}"), ax.set_xlabel(x), ax.set_ylabel(y)
+    return _save_fig(fig, path, "scatter")
+
+
+@operator(library=_LIB)
+async def histogram(table: Table, column: str, path: str, bins: int = 20, title: str = "") -> ChartResult:
+    """Histogram of a numeric ``column`` (``bins`` buckets) to a PNG at ``path``; returns a handle."""
+    plt, pd = _mpl()
+    _require_numeric(table, column, "histogram")
+    vals = pd.to_numeric(_to_df(table)[column], errors="coerce").dropna()
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
+    ax.hist(vals, bins=bins)
+    ax.set_title(title or f"Distribution of {column}"), ax.set_xlabel(column), ax.set_ylabel("count")
+    return _save_fig(fig, path, "histogram")
+
+
+@operator(library=_LIB)
+async def box(table: Table, column: str, path: str, by: str = "", title: str = "") -> ChartResult:
+    """Box plot of numeric ``column`` (optionally one box per ``by`` group) to a PNG; returns a handle."""
+    plt, pd = _mpl()
+    _require_numeric(table, column, "box")
+    df = _to_df(table)
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
+    if by:
+        _need(table, by)
+        groups, labels = [], []
+        for key, grp in df.groupby(by):
+            vals = pd.to_numeric(grp[column], errors="coerce").dropna()
+            if len(vals):
+                groups.append(vals)
+                labels.append(str(key))
+        ax.boxplot(groups, tick_labels=labels)
+        ax.set_xlabel(by)
+    else:
+        ax.boxplot(pd.to_numeric(df[column], errors="coerce").dropna())
+    ax.set_title(title or f"{column} distribution"), ax.set_ylabel(column)
+    return _save_fig(fig, path, "box")
+
+
+@operator(library=_LIB)
+async def pie(
+    table: Table, labels: str, values: str, path: str, title: str = "", max_slices: int = 8
+) -> ChartResult:
+    """Pie chart of numeric ``values`` summed per ``labels`` category; slices past ``max_slices``
+    are grouped into an "other" wedge. Writes a PNG at ``path``; returns a handle.
+    """
+    plt, pd = _mpl()
+    _need(table, labels)
+    _require_numeric(table, values, "pie")
+    df = _to_df(table)
+    ser = (
+        pd.to_numeric(df[values], errors="coerce")
+        .groupby(df[labels].astype("str"))
+        .sum()
+        .sort_values(ascending=False)
+    )
+    if len(ser) > max_slices:
+        ser = pd.concat([ser.iloc[:max_slices], pd.Series({"other": ser.iloc[max_slices:].sum()})])
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
+    ax.pie(ser.to_numpy(), labels=[str(i) for i in ser.index], autopct="%1.1f%%")
+    ax.set_title(title or f"{values} by {labels}")
+    return _save_fig(fig, path, "pie")
+
+
+@operator(library=_LIB)
+async def heatmap(table: Table, path: str, title: str = "") -> ChartResult:
+    """Heatmap of the table's numeric matrix (e.g. a ``correlation`` or ``pivot`` output) to a PNG.
+
+    The numeric columns form the grid; a leading non-numeric column (like ``correlation``'s
+    ``field``) labels the rows. Cells are annotated with their values. Returns a handle.
+    """
+    plt, pd = _mpl()
+    numeric = [c for c in table.columns if _column_is_numeric(table, c)]
+    if not numeric:
+        raise ValueError("heatmap: no numeric columns to plot")
+    label_col = next((c for c in table.columns if c not in numeric), None)
+    df = _to_df(table)
+    mat = df[numeric].apply(pd.to_numeric, errors="coerce").to_numpy()
+    row_labels = df[label_col].astype("str").tolist() if label_col else [str(i) for i in range(len(df))]
+    fig, ax = plt.subplots(figsize=(1 + 0.7 * len(numeric), 1 + 0.5 * len(row_labels)), dpi=100)
+    im = ax.imshow(mat, aspect="auto", cmap="coolwarm")
+    ax.set_xticks(range(len(numeric)))
+    ax.set_xticklabels(numeric, rotation=45, ha="right")
+    ax.set_yticks(range(len(row_labels)))
+    ax.set_yticklabels(row_labels)
+    for i in range(len(row_labels)):
+        for j in range(len(numeric)):
+            if mat[i][j] == mat[i][j]:  # skip NaN
+                ax.text(j, i, f"{mat[i][j]:.2f}", ha="center", va="center", fontsize=8)
+    fig.colorbar(im, ax=ax)
+    ax.set_title(title or "Heatmap")
+    return _save_fig(fig, path, "heatmap")
 
 
 # --- report --------------------------------------------------------------------------------

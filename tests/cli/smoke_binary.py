@@ -9,6 +9,7 @@ Tests:
   3. --setup starts far enough to load bundled setup/Textual assets
   4. Programmatic mode without an API key fails with the expected config error
   5. Runtime data files are present in the bundle
+  5b. scikit-learn is bundled (the analyst's ml_* operators) — build needs `--extra ml`
   6. The relocated bundle can be launched from PATH
   7. (Linux) No ELF binaries require executable stack (GNU_STACK RWE)
 """
@@ -194,6 +195,20 @@ def test_programmatic_missing_api_key(binary: Path) -> None:
         _fail(f"missing expected API key guidance:\n{output}")
 
     print("PASS: programmatic mode reports missing API key")
+
+
+def test_ml_extra_bundled(binary_dir: Path) -> None:
+    # The analyst's ml_* operators need scikit-learn; the build must pass `--extra ml` so the specs'
+    # collect_all bundles it. Verify the package is present (a full ml_* run needs a model backend,
+    # unavailable here — this checks the bundling that used to silently ship missing).
+    internal = binary_dir / "_internal"
+    if (internal / "sklearn").is_dir() and (internal / "scipy").is_dir():
+        print("PASS: scikit-learn (+scipy) bundled for the analyst ml_* operators")
+        return
+    _fail(
+        "scikit-learn not bundled — the analyst's ml_* operators will error in this binary. "
+        "Build with `--extra ml` (see scripts/ci/build-pyinstaller-binaries.sh)."
+    )
 
 
 def test_bundled_runtime_files(binary_dir: Path) -> None:
@@ -411,6 +426,7 @@ def main() -> None:
 
     test_version(binary)
     test_bundled_runtime_files(binary_dir)
+    test_ml_extra_bundled(binary_dir)
     test_installed_bundle_launches(binary_dir, binary_name)
     test_no_executable_stack(binary_dir, binary_name)
     test_interactive_launch_loads_bundled_assets(binary)

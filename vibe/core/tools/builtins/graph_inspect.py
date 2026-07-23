@@ -64,20 +64,6 @@ class GraphInspectState(BaseToolState):
     pass
 
 
-def _infer_dtype(values: list[Any]) -> str:
-    """A coarse dtype for a column: int / float / bool / str (nullable noted separately)."""
-    seen = [v for v in values if v is not None]
-    if not seen:
-        return "empty"
-    if all(isinstance(v, bool) for v in seen):
-        return "bool"
-    if all(isinstance(v, int) and not isinstance(v, bool) for v in seen):
-        return "int"
-    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in seen):
-        return "float"
-    return "str"
-
-
 class GraphInspect(
     BaseTool[GraphInspectArgs, GraphInspectResult, GraphInspectConfig, GraphInspectState],
     ToolUIData[GraphInspectArgs, GraphInspectResult],
@@ -155,7 +141,7 @@ class GraphInspect(
             columns: list[str] = list(payload.get("columns") or [])
             table_rows: list[dict[str, Any]] = list(payload.get("rows") or [])
             dtypes = {
-                col: _infer_dtype([r.get(col) for r in table_rows[:_DTYPE_SAMPLE]])
+                col: render.infer_dtype([r.get(col) for r in table_rows[:_DTYPE_SAMPLE]])
                 for col in columns
             }
             head = table_rows[:rows]

@@ -111,3 +111,19 @@ async def test_run_pipeline_coerces_quoted_number(tmp_path: Path) -> None:
     prog = 'sample_dataset(name="sales") | top_n(by="revenue", n="3") | to_markdown()'
     result = await _run(_tool(), prog, _ctx(tmp_path))
     assert result.applied and len(result.fresh) + len(result.cached) == 3
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_surfaces_per_node_schema(tmp_path: Path) -> None:
+    # The result reports each new/changed node's columns+dtypes so the agent stops guessing.
+    prog = 'sample_dataset(name="sales") | describe(columns=["revenue"]) | to_markdown(title="S")'
+    result = await _run(_tool(), prog, _ctx(tmp_path))
+    # the loaded table's real columns + dtypes are surfaced...
+    assert "revenue:float" in result.schemas["s1"] and "region:str" in result.schemas["s1"]
+    # ...and describe's RESHAPED output columns (so the agent won't reference the old columns)
+    assert "median:float" in result.schemas["s2"] and "column:str" in result.schemas["s2"]
+    # the model-facing text includes a schema block
+    from vibe.core.tools.builtins.graph_patch import format_llm_content
+
+    text = format_llm_content(result, show_catalog=False)
+    assert "schema of new/changed steps" in text and "revenue:float" in text

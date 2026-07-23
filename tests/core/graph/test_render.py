@@ -134,3 +134,24 @@ def test_node_detail_omits_run_data_when_none() -> None:
 
     text = str(node_detail("a", "src", {}, {}, state=None, cached=None, output=None))
     assert "last run" not in text and "cached" not in text
+
+
+def test_table_schema_compact_and_capped() -> None:
+    import json as _json
+
+    from vibe.core.graph.render import table_schema
+
+    payload = _json.dumps({
+        "columns": ["a", "b", "c"],
+        "rows": [{"a": 1, "b": 1.5, "c": "x"}, {"a": 2, "b": 2.5, "c": "y"}],
+    })
+    assert table_schema(payload) == "a:int, b:float, c:str (2 rows)"
+
+    # non-table payloads (a Report / plain value) → None
+    assert table_schema(_json.dumps({"markdown": "# hi"})) is None
+    assert table_schema("not json") is None
+
+    # wide tables are capped with a "+K more" marker
+    wide = _json.dumps({"columns": [f"c{i}" for i in range(40)], "rows": []})
+    sch = table_schema(wide)
+    assert sch is not None and "+10 more" in sch and sch.endswith("(0 rows)")

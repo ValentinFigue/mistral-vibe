@@ -8,8 +8,9 @@ diagram is emitted as text (the caller wraps it in a ```mermaid fence).
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 import re
-from typing import Protocol
+from typing import Any, Protocol
 
 from rich.text import Text
 
@@ -19,6 +20,44 @@ from vibe.core.graph.model import Graph, NodeId, NodeState
 from vibe.core.graph.operators import OperatorSpec
 
 _MAX_PREVIEW = 200
+_DTYPE_SAMPLE = 500  # rows scanned to infer a column's dtype
+_MAX_SCHEMA_COLS = 30  # wide tables: list this many columns, then "+K more"
+
+
+def infer_dtype(values: list[Any]) -> str:
+    """A coarse dtype for a column: int / float / bool / str / empty (nullable noted elsewhere)."""
+    seen = [v for v in values if v is not None]
+    if not seen:
+        return "empty"
+    if all(isinstance(v, bool) for v in seen):
+        return "bool"
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in seen):
+        return "int"
+    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in seen):
+        return "float"
+    return "str"
+
+
+def table_schema(payload: str) -> str | None:
+    """A compact one-line schema for a Table payload — ``"col:dtype, … (N rows)"``.
+
+    Returns ``None`` when the payload is not a ``{columns, rows}`` table (e.g. a Report or a
+    chart/export handle). Wide tables are capped to the first ``_MAX_SCHEMA_COLS`` columns + a
+    ``+K more`` marker; dtypes are inferred from a bounded row sample.
+    """
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not (isinstance(data, dict) and "columns" in data and "rows" in data):
+        return None
+    columns: list[str] = list(data.get("columns") or [])
+    rows: list[dict[str, Any]] = list(data.get("rows") or [])
+    shown = columns[:_MAX_SCHEMA_COLS]
+    parts = [f"{c}:{infer_dtype([r.get(c) for r in rows[:_DTYPE_SAMPLE]])}" for c in shown]
+    if len(columns) > _MAX_SCHEMA_COLS:
+        parts.append(f"+{len(columns) - _MAX_SCHEMA_COLS} more")
+    return f"{', '.join(parts)} ({len(rows)} rows)"
 
 
 class _CacheLike(Protocol):

@@ -113,6 +113,7 @@ class GraphPatchResult(BaseModel):
     cached: list[str] = Field(default_factory=list)
     outputs: dict[str, str] = Field(default_factory=dict)  # terminal node -> full-ish payload (UI)
     handles: dict[str, OutputHandle] = Field(default_factory=dict)  # terminal node -> handle (model)
+    schemas: dict[str, str] = Field(default_factory=dict)  # added/changed table node -> "col:dtype … (N rows)"
     catalog: str = ""
 
 
@@ -304,6 +305,32 @@ def _enforce_library(graph: Graph, library: str | None) -> None:
             )
 
 
+def _collect_schemas(
+    new: Graph, values: dict[NodeId, Value], cache: CacheStore, node_ids: set[str]
+) -> dict[str, str]:
+    """A compact ``col:dtype … (N rows)`` schema per Table node in ``node_ids`` (block-aware).
+
+    Only the added/changed nodes are passed, so the agent sees the shape of what it just built —
+    which is what stops it guessing column names / operator output shapes on the next turn. Cheap:
+    column names + a bounded dtype sample (no rows retained); non-Table nodes are skipped.
+    """
+    from vibe.core.graph import render
+
+    schemas: dict[str, str] = {}
+    for nid in node_ids:
+        node = new.nodes.get(nid)
+        if node is None:
+            continue
+        eid = f"{nid}/{get_block(node.op).output}" if is_block(node.op) else nid
+        value = values.get(eid)
+        if value is None or value.type != "Table":
+            continue
+        payload = cache.get(value.fingerprint)
+        if payload is not None and (sch := render.table_schema(payload.decode())):
+            schemas[nid] = sch
+    return schemas
+
+
 async def build_result(
     new: Graph, current: Graph, graph_dir: Path, library: str | None
 ) -> GraphPatchResult:
@@ -335,6 +362,7 @@ async def build_result(
             raise ToolError(f"graph execution failed: {exc}") from exc
         folded = fold_report(report, fold)
         collected = GraphPatch._collect_outputs(new, values, cache)
+        schemas = _collect_schemas(new, values, cache, set(delta["added"]) | set(delta["changed"]))
     finally:
         cache.close()
 
@@ -351,7 +379,7 @@ async def build_result(
         applied=True,
         added=delta["added"], changed=delta["changed"], removed=delta["removed"],
         fresh=folded.fresh(), cached=folded.cached(),
-        outputs=outputs, handles=handles, catalog=_render_catalog(library),
+        outputs=outputs, handles=handles, schemas=schemas, catalog=_render_catalog(library),
     )
 
 
@@ -372,6 +400,12 @@ def format_llm_content(result: GraphPatchResult, *, show_catalog: bool) -> str |
         f"applied · {len(result.fresh)} ran, {len(result.cached)} cached"
         + ("; " + "; ".join(delta) if delta else "")
     ]
+    if result.schemas:
+        # The shape of what was just built/changed, so the next step wires real columns (and the
+        # agent rarely needs a separate graph_inspect just to learn columns/dtypes).
+        lines.append("schema of new/changed steps (columns:dtype):")
+        for nid, sch in result.schemas.items():
+            lines.append(f"  {nid}: {sch}")
     if result.handles:
         lines.append(
             "terminal outputs (ref = content-addressed cache handle; "

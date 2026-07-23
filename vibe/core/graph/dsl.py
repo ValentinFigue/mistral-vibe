@@ -251,7 +251,11 @@ def _add_statement(
             raise DSLError("empty step in pipeline (check for '||' or a stray '|')")
         if _IDENT_RE.match(seg):  # a bare reference to an earlier node (pipeline start only)
             if idx != 0:
-                raise DSLError(f"reference {seg!r} may only start a pipeline")
+                raise DSLError(
+                    f"reference {seg!r} may only start a pipeline — to reuse a step, name it "
+                    f"(`x = …`) then start a new line with `x | …`, or wire it as an input kwarg "
+                    f"(e.g. `sql(query=…, t2={seg})`)"
+                )
             if seg not in named:
                 raise DSLError(f"unknown reference {seg!r}")
             prev = named[seg]

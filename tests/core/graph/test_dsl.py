@@ -188,6 +188,8 @@ def test_literals_and_lists() -> None:
         ('| to_markdown()', "empty step"),  # leading pipe, nothing before
         # a standalone tool used as a pipeline step → a clear "call it on its own" hint
         ('sample_dataset(name="sales") | graph_inspect(node_id="s1")', "separate tool"),
+        # a named reference dropped mid-pipeline → guidance to fan out or wire as a kwarg
+        ('a = sample_dataset(name="sales")\nsample_dataset(name="sales") | a', "reuse a step"),
     ],
 )
 def test_parse_errors(program: str, match: str) -> None:

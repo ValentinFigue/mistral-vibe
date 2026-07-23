@@ -36,6 +36,9 @@ from pydantic import BaseModel, Field
 from vibe.core.graph.blocks import BlockDef, is_block, register_block
 from vibe.core.graph.model import Graph, Node
 from vibe.core.graph.operators import operator
+from vibe.core.llm.types import (
+    LLMCaller,  # lightweight (protocol); the `llm` param is executor-injected
+)
 
 _LIB = "analysis"
 _MAX_CSV_BYTES = 50 * 1024 * 1024  # refuse files bigger than this (guard against OOM)
@@ -899,6 +902,90 @@ async def ml_cluster(
     km = KMeans(n_clusters=k, random_state=seed, n_init=10).fit(x)
     score = silhouette_score(x, km.labels_) if metric == "silhouette" else km.inertia_
     return _score_table(score)
+
+
+# --- insight (LLM-backed) ------------------------------------------------------------------
+# These ops call the session model via an executor-injected `llm` caller (reserved param). Results
+# are cached per recipe (goal/labels + input fingerprint), so a re-run is a cache hit — change the
+# goal or `/graph cache clear` to regenerate. They need a live session (headless → clear error).
+
+_MAX_NARRATE_ROWS = 50
+_MAX_CLASSIFY_ROWS = 200
+
+
+def _table_text(table: Table, max_rows: int) -> tuple[str, bool]:
+    """A compact ``col | col`` rendering of up to ``max_rows`` rows; also whether it was truncated."""
+    rows = table.rows[:max_rows]
+    header = " | ".join(table.columns)
+    body = "\n".join(" | ".join(str(r.get(c, "")) for c in table.columns) for r in rows)
+    return f"{header}\n{body}", len(table.rows) > max_rows
+
+
+@operator(library=_LIB, needs_llm=True)
+async def narrate(
+    table: Table, goal: str = "", max_rows: int = _MAX_NARRATE_ROWS, llm: LLMCaller | None = None
+) -> Report:
+    """Write a short, factual prose takeaway about ``table`` (optionally focused on ``goal``) — an
+    LLM step returning a Report. Best on a small summary/aggregate table (up to ``max_rows`` rows
+    are shown). Cached per (goal + table); calls the model once.
+    """
+    assert llm is not None  # guaranteed by the executor for needs_llm ops
+    data_text, truncated = _table_text(table, max_rows)
+    focus = f" Focus on: {goal}." if goal else ""
+    note = f"\n(showing first {max_rows} of {len(table.rows)} rows)" if truncated else ""
+    prompt = (
+        f"Interpret this table and write a concise, factual takeaway in 2-4 sentences.{focus}\n"
+        f"Use only what the data shows — do not invent numbers.\n\n{data_text}{note}"
+    )
+    text = await llm(prompt, system="You are a precise data analyst.", max_tokens=512)
+    return Report(markdown=text.strip())
+
+
+@operator(library=_LIB, needs_llm=True)
+async def classify(
+    table: Table,
+    column: str,
+    labels: list[str],
+    max_rows: int = _MAX_CLASSIFY_ROWS,
+    llm: LLMCaller | None = None,
+) -> Table:
+    """Label each row by its ``column`` text with exactly one of ``labels`` — one batched LLM call;
+    adds a ``{column}_label`` column. Errors (rather than silently truncating) if the table has more
+    than ``max_rows`` rows — filter/aggregate first. Cached per (column + labels + table).
+    """
+    import json
+
+    assert llm is not None  # guaranteed by the executor for needs_llm ops
+    _need(table, column)
+    labels = _cols(labels)
+    if not labels:
+        raise ValueError("classify: labels must be non-empty")
+    if len(table.rows) > max_rows:
+        raise ValueError(
+            f"classify: {len(table.rows)} rows exceeds max_rows={max_rows}; filter or aggregate first"
+        )
+    values = [str(r.get(column, "")) for r in table.rows]
+    numbered = "\n".join(f"{i}: {v}" for i, v in enumerate(values))
+    prompt = (
+        f"Classify each item into exactly one of these labels: {labels}.\n"
+        f"Return ONLY a JSON array of {len(values)} strings — one label per item, in order, "
+        f"no prose.\n\nItems:\n{numbered}"
+    )
+    raw = await llm(prompt, system="You label data. Output only a JSON array of labels.", max_tokens=2048)
+    try:
+        parsed = json.loads(raw[raw.index("[") : raw.rindex("]") + 1])
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"classify: model did not return a JSON array: {raw[:200]!r}") from exc
+    if not isinstance(parsed, list) or len(parsed) != len(values):
+        raise ValueError(f"classify: expected {len(values)} labels, got {len(parsed) if isinstance(parsed, list) else '?'}")
+    allowed = set(labels)
+    bad = sorted({str(p) for p in parsed if p not in allowed})
+    if bad:
+        raise ValueError(f"classify: model returned labels outside {labels}: {bad[:5]}")
+    out_col = f"{column}_label"
+    cols = table.columns + ([out_col] if out_col not in table.columns else [])
+    rows = [{**r, out_col: str(parsed[i])} for i, r in enumerate(table.rows)]
+    return _table(cols, rows)
 
 
 # --- data-quality gates --------------------------------------------------------------------

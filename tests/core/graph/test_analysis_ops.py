@@ -454,3 +454,69 @@ async def test_read_csv_and_fingerprint_expand_tilde(tmp_path, monkeypatch) -> N
     assert fp  # no OSError
     t = await A.read_csv(path="~/d.csv", content_fp=fp)
     assert t.columns == ["a", "b"] and t.rows == [{"a": 1, "b": "x"}]
+
+
+class _StubLLM:
+    """A deterministic stand-in for the injected LLMCaller — no backend needed."""
+
+    def __init__(self, *, labels: str | None = None, prose: str = "A concise takeaway.") -> None:
+        self._labels, self._prose, self.calls = labels, prose, 0
+
+    async def __call__(self, prompt: str, *, system: str | None = None, max_tokens: int = 1024) -> str:
+        self.calls += 1
+        return self._labels if "JSON array" in prompt else self._prose
+
+
+@pytest.mark.asyncio
+async def test_narrate_returns_prose_report() -> None:
+    t = await _sales()
+    llm = _StubLLM(prose="Revenue skews to a few countries.")
+    rep = await A.narrate(t, goal="revenue concentration", llm=llm)
+    assert isinstance(rep, A.Report) and rep.markdown == "Revenue skews to a few countries."
+    assert llm.calls == 1  # one LLM call
+
+
+@pytest.mark.asyncio
+async def test_classify_adds_label_column() -> None:
+    t = A.Table(columns=["text"], rows=[{"text": "great"}, {"text": "broken"}, {"text": "ok?"}])
+    llm = _StubLLM(labels='["praise", "bug", "question"]')
+    out = await A.classify(t, column="text", labels=["praise", "bug", "question"], llm=llm)
+    assert out.columns == ["text", "text_label"]
+    assert [r["text_label"] for r in out.rows] == ["praise", "bug", "question"]
+
+
+@pytest.mark.asyncio
+async def test_classify_rejects_bad_model_output() -> None:
+    t = A.Table(columns=["text"], rows=[{"text": "a"}, {"text": "b"}])
+    with pytest.raises(ValueError, match="expected 2 labels"):  # count mismatch
+        await A.classify(t, column="text", labels=["x", "y"], llm=_StubLLM(labels='["x"]'))
+    with pytest.raises(ValueError, match="outside"):  # label not in the allowed set
+        await A.classify(t, column="text", labels=["x", "y"], llm=_StubLLM(labels='["x", "z"]'))
+
+
+@pytest.mark.asyncio
+async def test_classify_errors_over_max_rows() -> None:
+    t = A.Table(columns=["text"], rows=[{"text": str(i)} for i in range(5)])
+    with pytest.raises(ValueError, match="exceeds max_rows"):
+        await A.classify(t, column="text", labels=["a"], max_rows=3, llm=_StubLLM(labels="[]"))
+
+
+@pytest.mark.asyncio
+async def test_llm_op_needs_a_backend() -> None:
+    # Through the executor with no llm injected → a clear "needs an LLM" error (not a crash).
+    from vibe.core.graph.executor import GraphValidationError, execute
+
+    g = Graph()
+    g.add(Node(id="s", op="sample_dataset", params={"name": "sales"}))
+    g.add(Node(id="n", op="narrate", params={"goal": "x"}, inputs={"table": "s"}))
+    with pytest.raises(GraphValidationError, match="needs an LLM"):
+        await execute(g, None, llm=None)
+
+
+def test_llm_ops_hide_the_reserved_param() -> None:
+    # `llm` is executor-injected, so it must not appear as a graph param (catalog/validate/fp).
+    from vibe.core.graph.operators import get_operator
+
+    for name in ("narrate", "classify"):
+        spec = get_operator(name)
+        assert spec.needs_llm and "llm" not in spec.param_names and "llm" not in spec.arg_types

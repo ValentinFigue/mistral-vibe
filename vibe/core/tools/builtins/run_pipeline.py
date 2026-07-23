@@ -105,7 +105,10 @@ class RunPipeline(
         except DSLError as exc:
             raise ToolError(f"pipeline error: {exc}") from exc
 
-        result = await build_result(new, current, graph_dir, self.config.library)
+        # A live session's ctx carries a sampling handler → an LLM caller for narrate/classify;
+        # None when headless (those ops then raise a clear "needs a live session" error).
+        llm = ctx.sampling_callback.complete_text if (ctx and ctx.sampling_callback) else None
+        result = await build_result(new, current, graph_dir, self.config.library, llm=llm)
         self.state.graph_json = new.model_dump_json()
         yield result
 

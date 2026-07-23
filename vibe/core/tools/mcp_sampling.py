@@ -80,6 +80,31 @@ class MCPSamplingHandler:
             logger.warning("MCP sampling request failed: %s", exc)
             return ErrorData(code=-1, message=f"Sampling failed: {exc}")
 
+    async def complete_text(
+        self, prompt: str, *, system: str | None = None, max_tokens: int = 1024
+    ) -> str:
+        """A plain prompt → text completion on the session's active model (temperature 0).
+
+        The :class:`~vibe.core.llm.types.LLMCaller` used by graph operators (``narrate``/``classify``)
+        — a thin, deterministic wrapper over the same backend the agent uses.
+        """
+        model = self._config_getter().get_active_model()
+        messages: list[LLMMessage] = []
+        if system:
+            messages.append(LLMMessage(role=Role.system, content=system))
+        messages.append(LLMMessage(role=Role.user, content=prompt))
+        result = await self._backend_getter().complete(
+            model=model,
+            messages=messages,
+            temperature=0.0,
+            tools=None,
+            max_tokens=max_tokens,
+            tool_choice=None,
+            extra_headers=(None if self._extra_headers_getter is None else self._extra_headers_getter()),
+            metadata=(None if self._metadata_getter is None else self._metadata_getter()),
+        )
+        return result.message.content or ""
+
 
 def _map_sampling_messages(messages: list[Any]) -> list[LLMMessage]:
     result: list[LLMMessage] = []

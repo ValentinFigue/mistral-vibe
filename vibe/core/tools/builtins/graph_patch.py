@@ -17,7 +17,7 @@ from collections import Counter
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from textwrap import indent
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +58,9 @@ from vibe.core.tools.base import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolResultEvent
+
+if TYPE_CHECKING:
+    from vibe.core.llm.types import LLMCaller
 
 _MAX_OUTPUT_CHARS = 800
 _MAX_GLIMPSE_CHARS = 120
@@ -205,7 +208,8 @@ class GraphPatch(
         except PatchError as exc:
             raise ToolError(f"invalid patch: {exc}") from exc
 
-        result = await build_result(new, current, graph_dir, self.config.library)
+        llm = ctx.sampling_callback.complete_text if (ctx and ctx.sampling_callback) else None
+        result = await build_result(new, current, graph_dir, self.config.library, llm=llm)
         # Persist the (autofilled) graph to in-memory state so it resumes across turns.
         self.state.graph_json = new.model_dump_json()
         yield result
@@ -332,7 +336,11 @@ def _collect_schemas(
 
 
 async def build_result(
-    new: Graph, current: Graph, graph_dir: Path, library: str | None
+    new: Graph,
+    current: Graph,
+    graph_dir: Path,
+    library: str | None,
+    llm: LLMCaller | None = None,
 ) -> GraphPatchResult:
     """Validate + execute the authored graph incrementally and build the shared result.
 
@@ -357,7 +365,7 @@ async def build_result(
     cache.evict_to(SHARED_CACHE_MAX_BYTES)
     try:
         try:
-            values, report = await execute(expanded, cache, expand_blocks=False)
+            values, report = await execute(expanded, cache, expand_blocks=False, llm=llm)
         except Exception as exc:  # operator raised at runtime — surface as recoverable
             raise ToolError(f"graph execution failed: {exc}") from exc
         folded = fold_report(report, fold)

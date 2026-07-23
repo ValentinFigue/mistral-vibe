@@ -10,6 +10,19 @@ if TYPE_CHECKING:
     from vibe.core.config import ModelConfig
 
 
+class LLMCaller(Protocol):
+    """A minimal prompt → text port injected into graph operators that need the LLM.
+
+    Deterministic (temperature 0) plain-text completion on the session's active model — the graph
+    executor injects an implementation (see ``MCPSamplingHandler.complete_text``) only into
+    operators declared ``@operator(needs_llm=True)``; pure operators never see it.
+    """
+
+    async def __call__(
+        self, prompt: str, *, system: str | None = None, max_tokens: int = 1024
+    ) -> str: ...
+
+
 class BackendLike(Protocol):
     """Port protocol for dependency-injectable LLM backends.
 

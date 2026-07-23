@@ -18,8 +18,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import time
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from vibe.core.llm.types import LLMCaller
 
 from vibe.core.graph.cache import CacheStore
 from vibe.core.graph.fingerprint import fingerprint_node
@@ -127,7 +131,11 @@ def _topo_order(graph: Graph) -> list[NodeId]:
 
 
 async def _run_operator(
-    spec: OperatorSpec, graph: Graph, node_id: NodeId, results: dict[NodeId, BaseModel]
+    spec: OperatorSpec,
+    graph: Graph,
+    node_id: NodeId,
+    results: dict[NodeId, BaseModel],
+    llm: LLMCaller | None = None,
 ) -> BaseModel:
     """Bind inputs (upstream results) and params (literals) by name and call the operator."""
     node = graph.nodes[node_id]
@@ -136,6 +144,13 @@ async def _run_operator(
     # Fill any optional params the author omitted from the operator's signature defaults.
     for name, value in spec.defaults.items():
         kwargs.setdefault(name, value)
+    if spec.needs_llm:  # executor-injected caller (reserved `llm` param, not a graph param)
+        if llm is None:
+            raise GraphValidationError(
+                f"operator {node.op!r} needs an LLM — run it inside a live session "
+                "(no model backend is available here)"
+            )
+        kwargs["llm"] = llm
     return await spec.func(**kwargs)
 
 
@@ -146,6 +161,7 @@ async def execute(
     on_event: Callable[[GraphEvent], None] | None = None,
     verify_purity: bool = False,
     expand_blocks: bool = True,
+    llm: LLMCaller | None = None,
 ) -> tuple[dict[NodeId, Value], Report]:
     """Execute ``graph``, returning value handles per node and an execution :class:`Report`.
 
@@ -183,7 +199,7 @@ async def execute(
         outcomes = await asyncio.gather(
             *(
                 _process_node(
-                    graph, nid, cache, fingerprints, results, verify_purity
+                    graph, nid, cache, fingerprints, results, verify_purity, llm
                 )
                 for nid in wave
             )
@@ -221,6 +237,7 @@ async def _process_node(
     fingerprints: dict[NodeId, str],
     results: dict[NodeId, BaseModel],
     verify_purity: bool,
+    llm: LLMCaller | None = None,
 ) -> tuple[NodeId, BaseModel, NodeState, float]:
     node = graph.nodes[node_id]
     spec = get_operator(node.op)
@@ -230,8 +247,9 @@ async def _process_node(
     payload = cache.get(fp) if cache is not None else None
     if payload is not None:
         result: BaseModel = spec.result_type.model_validate_json(payload)
-        if verify_purity:
-            fresh = await _run_operator(spec, graph, node_id, results)
+        # LLM ops are non-deterministic → exempt from the re-run purity check.
+        if verify_purity and not spec.needs_llm:
+            fresh = await _run_operator(spec, graph, node_id, results, llm)
             if fresh.model_dump(mode="json") != result.model_dump(mode="json"):
                 raise PurityError(
                     f"operator {node.op!r} at node {node_id!r} is not pure: "
@@ -239,7 +257,7 @@ async def _process_node(
                 )
         return node_id, result, "cached", time.perf_counter() - start
 
-    result = await _run_operator(spec, graph, node_id, results)
+    result = await _run_operator(spec, graph, node_id, results, llm)
     if cache is not None:
         cache.put(fp, result.model_dump_json().encode(), op_type=node.op)
     return node_id, result, "fresh", time.perf_counter() - start

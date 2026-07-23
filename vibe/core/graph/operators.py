@@ -44,6 +44,7 @@ class OperatorSpec:
     description: str = ""  # first docstring line
     library: str | None = None  # catalog-scoping tag; None = untagged (generic/kitchen-sink)
     reads_file: str | None = None  # name of a path param whose file content is fingerprinted
+    needs_llm: bool = False  # op declares an `llm` param the executor injects at run time
     defaults: dict[str, Any] = field(default_factory=dict)  # params with a signature default (optional)
     allowed_values: dict[str, tuple[str, ...]] = field(default_factory=dict)  # enum params (Literal)
     param_types: dict[str, Any] = field(default_factory=dict)  # arg name -> resolved annotation
@@ -57,6 +58,7 @@ class OperatorSpec:
 
 
 _REGISTRY: dict[str, OperatorSpec] = {}
+_LLM_PARAM = "llm"  # reserved param name injected by the executor for needs_llm operators
 
 
 def _readable_type(annotation: Any) -> str:
@@ -119,13 +121,16 @@ def operator(
     name: str | None = None,
     library: str | None = None,
     reads_file: str | None = None,
+    needs_llm: bool = False,
 ) -> Any:
     """Register an async operator. Usable as ``@operator`` or ``@operator(name=...)``.
 
     ``library`` tags the operator for per-agent catalog scoping (``None`` = untagged, shown to
     the generic agent). ``reads_file`` names a path param whose file content the caller should
     fingerprint (see ``graph_patch``'s content-hash autofill); the op must also declare a
-    ``content_fp`` param.
+    ``content_fp`` param. ``needs_llm=True`` declares the op takes a reserved ``llm`` parameter
+    (an :class:`LLMCaller`) that the **executor injects at run time** — it is not a graph param, so
+    it's excluded from the catalog, validation, and the recipe fingerprint.
     """
 
     def wrap(fn: Callable[..., Awaitable[BaseModel]]) -> Callable[..., Awaitable[BaseModel]]:
@@ -134,11 +139,15 @@ def operator(
             raise TypeError(f"operator {op_name!r} must be an async function")
 
         signature = inspect.signature(fn)
-        params = tuple(signature.parameters)
+        # A `needs_llm` op declares a reserved `llm` param the executor injects at run time; drop it
+        # from the graph-visible params so validate/catalog/fingerprint never see it.
+        if needs_llm and _LLM_PARAM not in signature.parameters:
+            raise TypeError(f"operator {op_name!r}: needs_llm=True requires an {_LLM_PARAM!r} parameter")
+        params = tuple(p for p in signature.parameters if not (needs_llm and p == _LLM_PARAM))
         defaults = {
             name: p.default
             for name, p in signature.parameters.items()
-            if p.default is not inspect.Parameter.empty
+            if p.default is not inspect.Parameter.empty and name in params
         }
         hints = get_type_hints(fn)
         result_type = hints.get("return")
@@ -167,6 +176,7 @@ def operator(
             description=description,
             library=library,
             reads_file=reads_file,
+            needs_llm=needs_llm,
             defaults=defaults,
             allowed_values=allowed_values,
             param_types=param_types,

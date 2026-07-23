@@ -1,0 +1,44 @@
+# Master Services Agreement
+
+This Master Services Agreement ("Agreement") is entered into by and between Acme Corp
+("Provider") and the counterparty identified on the applicable Order Form ("Customer").
+
+## 1. Term and Renewal
+This Agreement begins on the Effective Date and continues for an initial term of twelve (12)
+months. It renews automatically for successive twelve (12) month periods unless either party
+gives written notice of non-renewal at least sixty (60) days before the end of the then-current
+term.
+
+## 2. Fees and Payment
+Customer shall pay all fees within forty-five (45) days of the invoice date. Late amounts accrue
+interest at 1.5% per month. All fees are non-refundable except as expressly set out herein.
+
+## 3. Termination
+Either party may terminate this Agreement for material breach that remains uncured thirty (30)
+days after written notice. Provider may terminate immediately if Customer fails to pay undisputed
+fees within fifteen (15) days of a second notice.
+
+## 4. Confidentiality
+Each party shall protect the other party's Confidential Information using at least the same degree
+of care it uses for its own, and no less than a reasonable degree of care. Confidentiality
+obligations survive termination for a period of three (3) years.
+
+## 5. Limitation of Liability
+Except for breaches of confidentiality, each party's total aggregate liability under this Agreement
+shall not exceed the total fees paid by Customer in the twelve (12) months preceding the claim.
+Neither party is liable for indirect, incidental, or consequential damages.
+
+## 6. Indemnification
+Provider shall defend and indemnify Customer against third-party claims that the Services infringe
+a valid patent, copyright, or trademark, provided Customer promptly notifies Provider and grants
+sole control of the defense.
+
+## 7. Governing Law
+This Agreement is governed by the laws of the State of Delaware, without regard to its conflict of
+laws principles. The parties consent to the exclusive jurisdiction of the state and federal courts
+located in Wilmington, Delaware.
+
+## 8. Data Protection
+Provider processes Customer personal data only to provide the Services and in accordance with the
+Data Processing Addendum. Provider maintains administrative, physical, and technical safeguards
+appropriate to the sensitivity of the data.

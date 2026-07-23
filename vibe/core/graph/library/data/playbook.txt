@@ -1,0 +1,20 @@
+STANDARD CONTRACT PLAYBOOK — Acme Corp preferred positions
+
+Payment: Net 30 from invoice date. Net 45 or longer is a deviation requiring approval.
+
+Termination: Mutual termination for material breach with a 30-day cure period is standard.
+Immediate termination rights for one party only are a deviation.
+
+Limitation of Liability: Aggregate liability cap at 12 months of fees is standard. An
+uncapped liability (other than the confidentiality carve-out) is a deviation. Exclusion of
+indirect/consequential damages is standard.
+
+Confidentiality: Survival of 2-3 years is standard. Perpetual survival is a deviation.
+
+Indemnification: Provider indemnifies for third-party IP infringement claims (standard).
+Broad, uncapped indemnities are a deviation.
+
+Governing Law: Delaware or New York are acceptable. Any other jurisdiction is a deviation.
+
+Data Protection: A Data Processing Addendum with appropriate safeguards is required for any
+agreement involving personal data.

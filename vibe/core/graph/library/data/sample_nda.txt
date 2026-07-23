@@ -1,0 +1,25 @@
+# Mutual Non-Disclosure Agreement
+
+This Mutual Non-Disclosure Agreement ("Agreement") governs the exchange of confidential
+information between the parties for the purpose of evaluating a potential business relationship.
+
+## 1. Definition of Confidential Information
+"Confidential Information" means any non-public information disclosed by one party to the other,
+whether oral, written, or electronic, that is designated as confidential or that reasonably should
+be understood to be confidential given its nature.
+
+## 2. Obligations
+The receiving party shall use the Confidential Information solely to evaluate the potential
+relationship and shall not disclose it to any third party without the disclosing party's prior
+written consent.
+
+## 3. Term
+This Agreement remains in effect for two (2) years from the Effective Date. Confidentiality
+obligations survive for five (5) years following disclosure.
+
+## 4. Return of Materials
+Upon written request, the receiving party shall promptly return or destroy all Confidential
+Information and certify such destruction in writing.
+
+## 5. Governing Law
+This Agreement is governed by the laws of the State of New York.

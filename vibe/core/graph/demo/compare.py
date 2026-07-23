@@ -32,6 +32,7 @@ from vibe.core.graph.demo.research import build_research_graph as _research_buil
 from vibe.core.graph.executor import execute
 from vibe.core.graph.fingerprint import content_hash
 import vibe.core.graph.library.analysis  # noqa: F401  (registers the analysis operator kit)
+import vibe.core.graph.library.doc_reviewer  # noqa: F401  (registers the document-review kit)
 from vibe.core.graph.model import Graph, Node, Report, Value
 from vibe.core.tools.builtins.graph_patch import (
     _MAX_OUTPUT_CHARS,
@@ -93,6 +94,58 @@ def build_analytics_graph(work_dir: Path, *, key: str = "country") -> Graph:
 def build_research_graph(work_dir: Path, *, keyword: str = "latency") -> Graph:
     """Adapter: the research demo graph (ignores work_dir; keeps the measure_workflow signature)."""
     return _research_build(keyword=keyword)
+
+
+_CLAUSES = (
+    ("Term and Renewal", "renewal"),
+    ("Fees and Payment", "payment"),
+    ("Termination", "termination"),
+    ("Confidentiality", "confidentiality"),
+    ("Limitation of Liability", "liability"),
+    ("Indemnification", "indemnity"),
+    ("Governing Law", "jurisdiction"),
+    ("Data Protection", "data"),
+)
+
+
+def _write_contract(work_dir: Path, n_repeats: int = 40) -> Path:
+    """Write a deterministic multi-section contract (large intermediate for the comparison).
+
+    Each clause is repeated across ``n_repeats`` numbered exhibits so the parsed ``Document`` is
+    sizeable (kept in the cache as a handle), while the ``outline`` report stays tiny.
+    """
+    path = work_dir / "contract.txt"
+    if not path.exists():
+        lines = ["# Master Services Agreement", ""]
+        for exhibit in range(n_repeats):
+            for i, (heading, term) in enumerate(_CLAUSES, start=1):
+                lines.append(f"## Exhibit {exhibit}.{i} {heading}")
+                lines.append(
+                    f"This {heading.lower()} clause (exhibit {exhibit}) governs {term}. "
+                    f"The parties agree to standard {term} terms as set out in this section, "
+                    f"which the reviewer must assess for risk and deviation from the playbook."
+                )
+                lines.append("")
+        path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def build_docreview_graph(work_dir: Path, *, contains: str = "indemnity") -> Graph:
+    """The document-review workflow on the real kit — read_document → filter_sections → outline.
+
+    Deterministic (no LLM) so it runs headless in this harness; it still exercises a large
+    ``Document`` artifact flowing through the graph, which is the point of the comparison. The
+    LLM-backed ops (extract_clauses / classify_risk / …) are covered by the live smoke test.
+    """
+    path = _write_contract(work_dir)
+    g = Graph()
+    g.add(Node(id="doc", op="read_document",
+               params={"path": str(path), "content_fp": content_hash(path)}))
+    g.add(Node(id="filtered", op="filter_sections",
+               params={"contains": contains}, inputs={"doc": "doc"}))
+    g.add(Node(id="report", op="outline",
+               params={"title": f"Sections mentioning {contains!r}"}, inputs={"doc": "filtered"}))
+    return g
 
 
 def _transcript_context(graph: Graph, values: dict[str, Value], cache: CacheStore) -> str:
@@ -246,7 +299,13 @@ async def main() -> None:
         edit_kwargs={"keyword": "pricing"},
         edit_label="extract keyword latency → pricing",
     )
-    for metrics in (analytics, research):
+    doc_review = await measure_workflow(
+        "doc-review",
+        build_docreview_graph,
+        edit_kwargs={"contains": "termination"},
+        edit_label="filter sections indemnity → termination",
+    )
+    for metrics in (analytics, research, doc_review):
         _print_metrics(metrics)
 
 

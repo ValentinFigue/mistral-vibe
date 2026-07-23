@@ -45,6 +45,7 @@ class BuiltinAgentName(StrEnum):
     LEAN = "lean"
     GRAPH = "graph"
     ANALYST = "analyst"
+    DOC_REVIEWER = "doc-reviewer"
 
 
 @dataclass(frozen=True)
@@ -235,6 +236,30 @@ ANALYST = AgentProfile(
     },
 )
 
+DOC_REVIEWER = AgentProfile(
+    name=BuiltinAgentName.DOC_REVIEWER,
+    display_name="Document Reviewer",
+    description="Review contracts & documents by authoring a workflow graph (load → extract → classify → report)",
+    safety=AgentSafety.NEUTRAL,
+    agent_type=AgentType.AGENT,
+    overrides={
+        "enabled_tools": [
+            "run_pipeline",
+            "graph_inspect",
+            "graph_save_block",
+            "ask_user_question",
+        ],
+        "system_prompt_id": "doc_reviewer",
+        # Scope the pipeline tool to the document-review operator library — the reviewer sees and
+        # may reference only that library's operators and blocks (a different artifact than the
+        # analyst's tables, proving the engine is library-agnostic).
+        "tools": {
+            "run_pipeline": {"library": "documents"},
+            "graph_save_block": {"library": "documents"},
+        },
+    },
+)
+
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.DEFAULT: DEFAULT,
     BuiltinAgentName.PLAN: PLAN,
@@ -244,4 +269,5 @@ BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.LEAN: LEAN,
     BuiltinAgentName.GRAPH: GRAPH,
     BuiltinAgentName.ANALYST: ANALYST,
+    BuiltinAgentName.DOC_REVIEWER: DOC_REVIEWER,
 }

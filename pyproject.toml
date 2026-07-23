@@ -134,6 +134,11 @@ dependencies = [
 ml = [
     "scikit-learn==1.9.0",
 ]
+# Optional PDF loading for the doc-reviewer (read_document on .pdf files).
+# .txt/.md need no extra; enable with `uv sync --extra pdf` (or `pip install vibe[pdf]`).
+pdf = [
+    "pypdf==5.1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/mistralai/mistral-vibe"

@@ -1235,6 +1235,9 @@ dependencies = [
 ml = [
     { name = "scikit-learn" },
 ]
+pdf = [
+    { name = "pypdf" },
+]
 
 [package.dev-dependencies]
 build = [
@@ -1334,6 +1337,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = "==2.14.0" },
     { name = "pygments", specifier = "==2.20.0" },
     { name = "pyjwt", specifier = "==2.12.1" },
+    { name = "pypdf", marker = "extra == 'pdf'", specifier = "==5.1.0" },
     { name = "pyperclip", specifier = "==1.11.0" },
     { name = "python-dateutil", specifier = "==2.9.0.post0" },
     { name = "python-dotenv", specifier = "==1.2.2" },
@@ -1369,7 +1373,7 @@ requires-dist = [
     { name = "zipp", specifier = "==3.23.1" },
     { name = "zstandard", specifier = "==0.25.0" },
 ]
-provides-extras = ["ml"]
+provides-extras = ["ml", "pdf"]
 
 [package.metadata.requires-dev]
 build = [
@@ -2070,6 +2074,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
+]
+
+[[package]]
+name = "pypdf"
+version = "5.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6b/9a/72d74f05f64895ebf1c7f6646cf7fe6dd124398c5c49240093f92d6f0fdd/pypdf-5.1.0.tar.gz", hash = "sha256:425a129abb1614183fd1aca6982f650b47f8026867c0ce7c4b9f281c443d2740", size = 5011381, upload-time = "2024-10-27T19:46:47.002Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/fc/6f52588ac1cb4400a7804ef88d0d4e00cfe57a7ac6793ec3b00de5a8758b/pypdf-5.1.0-py3-none-any.whl", hash = "sha256:3bd4f503f4ebc58bae40d81e81a9176c400cbbac2ba2d877367595fb524dfdfc", size = 297976, upload-time = "2024-10-27T19:46:44.439Z" },
 ]
 
 [[package]]

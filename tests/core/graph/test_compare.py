@@ -6,6 +6,7 @@ import pytest
 
 from vibe.core.graph.demo.compare import (
     build_analytics_graph,
+    build_docreview_graph,
     build_research_graph,
     measure_workflow,
 )
@@ -32,6 +33,19 @@ async def test_research_comparison_reduces_context(tmp_path: Path) -> None:
     )
     assert m.cold.graph_tokens < m.cold.transcript_tokens
     assert m.rerun.graph_nodes < m.rerun.transcript_nodes
+
+
+@pytest.mark.asyncio
+async def test_docreview_comparison_reduces_context(tmp_path: Path) -> None:
+    # A different artifact (Document, not Table) flows through the same engine: the large parsed
+    # document stays in the cache, so the graph context is far smaller and only the dirty subgraph
+    # recomputes on the filter edit.
+    m = await measure_workflow(
+        "doc-review", build_docreview_graph, {"contains": "termination"}, "filter sections",
+        work_dir=tmp_path,
+    )
+    assert m.cold.graph_tokens < m.cold.transcript_tokens
+    assert m.rerun.graph_nodes < m.node_count
 
 
 @pytest.mark.asyncio

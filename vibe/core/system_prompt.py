@@ -317,7 +317,11 @@ def _get_graph_catalog_section(
     """
     from vibe.core.agents.models import BuiltinAgentName
 
-    if agent_manager.active_profile.name not in {BuiltinAgentName.GRAPH, BuiltinAgentName.ANALYST}:
+    if agent_manager.active_profile.name not in {
+        BuiltinAgentName.GRAPH,
+        BuiltinAgentName.ANALYST,
+        BuiltinAgentName.DOC_REVIEWER,
+    }:
         return ""
     # The graph agent authors via `graph_patch`; the analyst via `run_pipeline`.
     authoring = next((t for t in ("graph_patch", "run_pipeline") if t in tool_manager.available_tools), None)

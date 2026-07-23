@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **[Experimental / internal]** Métier graph-agent efficiency: operators may now declare **optional params** (signature defaults) — `validate` requires only params without a default and the executor fills the rest — so common patches shrink and can't miss a param (e.g. `to_markdown(max_rows=50)`, `top_n(n=10)`, `group_by(aggs=["sum"])`); the catalog shows defaults as `name:type=default`. **Type-aware wiring validation** now rejects a mis-wired input (e.g. a `Report` fed into a table op) at validate time with a clear message instead of a runtime error. The scoped **operator catalog is injected into the graph/analyst system prompt**, so the agent authors from turn 1 without a dedicated empty-patch round-trip. Together these cut the LLM round-trips (hence input tokens) a graph agent spends per task.
 - **[Experimental / internal]** Token usage now tracks **cached prompt tokens**: `LLMUsage.cached_tokens` (populated from Anthropic/Vertex `cache_read_input_tokens`; the Mistral SDK exposes no prompt-cache control or cached-token usage, so it reports 0) and the session-exit readout shows `input=… (… cached)`.
 
+### Fixed
+
+- **[Experimental / internal]** Métier analyst — `describe`/`correlation` label column renamed `column` → `field`: `column` is a SQL reserved word, so a downstream `sql("SELECT column … FROM t1")` failed at parse time (seen in a live session). `field` selects cleanly. `CACHE_VERSION` bumped 2 → 3 (output shape changed). The prompt also clarifies that `narrate`/`classify` take a **table** (a `describe`/`correlation`/`group_by`/`sql` output), not a block or report.
+
 ## [2.15.0] - 2026-06-12
 
 ### Added

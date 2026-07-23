@@ -61,8 +61,9 @@ Reach for the **typed operators** first — they're validated and can't be mis-s
   return the held-out metric (never hand-roll this in SQL).
 - **Common shapes** — blocks `rank_by`, `trend_by_period`, `quick_profile`, `segment_summary`.
 - **Insight (LLM)** — `narrate(table, goal="…")` writes a short prose takeaway about a *small*
-  summary table; `classify(table, column, labels=[…])` labels each row's text. These call the model,
-  so run them on an already-reduced table (a `describe`/`group_by` output, not raw 100k rows).
+  summary table; `classify(table, column, labels=[…])` labels each row's text. These take a **table**
+  (a `describe`/`correlation`/`group_by`/`sql` output) — **not** a block or a `to_markdown`/report;
+  pipe the computed table straight in. They call the model, so run them on an already-reduced table.
 
 Use **`sql(query="""…""")`** for what SQL is genuinely best at: **filtering, joining, grouping,
 pivoting, window functions, and conditional/derived columns**. Triple-quote the query; reference

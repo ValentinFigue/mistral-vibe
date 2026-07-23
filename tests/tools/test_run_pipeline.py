@@ -121,7 +121,7 @@ async def test_run_pipeline_surfaces_per_node_schema(tmp_path: Path) -> None:
     # the loaded table's real columns + dtypes are surfaced...
     assert "revenue:float" in result.schemas["s1"] and "region:str" in result.schemas["s1"]
     # ...and describe's RESHAPED output columns (so the agent won't reference the old columns)
-    assert "median:float" in result.schemas["s2"] and "column:str" in result.schemas["s2"]
+    assert "median:float" in result.schemas["s2"] and "field:str" in result.schemas["s2"]
     # the model-facing text includes a schema block
     from vibe.core.tools.builtins.graph_patch import format_llm_content
 

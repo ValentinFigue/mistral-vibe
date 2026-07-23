@@ -508,14 +508,16 @@ async def describe(table: Table, columns: list[str] | None = None) -> Table:
     cols = _cols(columns) or [c for c in table.columns if _column_is_numeric(table, c)]
     _need(table, *cols)
     df = _to_df(table)
-    out_cols = ["column", "count", "mean", "std", "min", "p25", "median", "p75", "max"]
+    # label column is "field" (not "column" — the latter is a SQL reserved word and would break a
+    # downstream sql(SELECT column ...) step).
+    out_cols = ["field", "count", "mean", "std", "min", "p25", "median", "p75", "max"]
     rows: list[dict[str, Any]] = []
     for c in cols:
         _require_numeric(table, c, "describe")
         s = pd.to_numeric(df[c], errors="coerce").dropna()
         has = len(s) > 0
         rows.append({
-            "column": c,
+            "field": c,
             "count": int(s.count()),
             "mean": round(float(s.mean()), 4) if has else None,
             "std": round(float(s.std(ddof=1)), 4) if len(s) > 1 else 0.0,
@@ -655,7 +657,7 @@ async def bin_column(table: Table, column: str, bins: int = 4, name: str | None 
 
 @operator(library=_LIB)
 async def correlation(table: Table, columns: list[str] | None = None) -> Table:
-    """Pearson correlation matrix over numeric columns (a ``column`` label col + one col each)."""
+    """Pearson correlation matrix over numeric columns (a ``field`` label col + one col each)."""
     import pandas as pd
 
     cols = _cols(columns) or [c for c in table.columns if _column_is_numeric(table, c)]
@@ -663,7 +665,8 @@ async def correlation(table: Table, columns: list[str] | None = None) -> Table:
     for c in cols:
         _require_numeric(table, c, "correlation")
     num = _to_df(table)[cols].apply(pd.to_numeric, errors="coerce")
-    return _from_df(num.corr().round(4).reset_index(names="column"))
+    # label column "field" (not "column" — a SQL reserved word) so a downstream sql() can select it
+    return _from_df(num.corr().round(4).reset_index(names="field"))
 
 
 @operator(library=_LIB)

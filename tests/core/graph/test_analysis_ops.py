@@ -79,7 +79,9 @@ async def test_date_part_and_describe() -> None:
     assert "date_month" in dp.columns and dp.rows[0]["date_month"] in range(1, 13)
     desc = await A.describe(t, columns=["revenue"])
     row = desc.rows[0]
-    assert row["column"] == "revenue" and row["count"] == len(t.rows)
+    # the label column is "field" (not the SQL reserved word "column")
+    assert row["field"] == "revenue" and row["count"] == len(t.rows)
+    assert "column" not in desc.columns
     # median/quartiles are now part of describe, ordered min ≤ p25 ≤ median ≤ p75 ≤ max
     assert set(desc.columns) >= {"min", "p25", "median", "p75", "max"}
     assert row["min"] <= row["p25"] <= row["median"] <= row["p75"] <= row["max"]
@@ -334,7 +336,7 @@ async def test_new_pandas_ops() -> None:
     piv = await A.pivot(t, index="region", columns="product", values="revenue", aggfunc="sum")
     assert piv.columns[0] == "region" and len(piv.columns) > 1
     corr = await A.correlation(t, columns=["units", "revenue"])
-    assert corr.rows[0]["column"] == "units" and corr.rows[0]["units"] == 1.0
+    assert corr.rows[0]["field"] == "units" and corr.rows[0]["units"] == 1.0
     ranked = await A.rank(t, by="revenue", name="rk")
     assert "rk" in ranked.columns and min(r["rk"] for r in ranked.rows) == 1
     binned = await A.bin_column(t, column="revenue", bins=3)
@@ -520,3 +522,16 @@ def test_llm_ops_hide_the_reserved_param() -> None:
     for name in ("narrate", "classify"):
         spec = get_operator(name)
         assert spec.needs_llm and "llm" not in spec.param_names and "llm" not in spec.arg_types
+
+
+@pytest.mark.asyncio
+async def test_describe_output_is_sql_selectable() -> None:
+    # Regression: the describe/correlation label column must not be a SQL reserved word — a
+    # downstream sql() selecting it used to fail on `column`. `field` selects cleanly.
+    t = await _sales()
+    desc = await A.describe(t, columns=["revenue", "cost"])
+    out = await A.sql(query="SELECT field, mean FROM t1 ORDER BY mean DESC", t1=desc)
+    assert out.columns == ["field", "mean"]
+    assert {r["field"] for r in out.rows} == {"revenue", "cost"}
+    corr = await A.correlation(t, columns=["revenue", "cost"])
+    assert "field" in corr.columns and "column" not in corr.columns

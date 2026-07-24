@@ -46,6 +46,8 @@ class BuiltinAgentName(StrEnum):
     GRAPH = "graph"
     ANALYST = "analyst"
     DOC_REVIEWER = "doc-reviewer"
+    TEACHER = "teacher"
+    TUTOR = "tutor"
 
 
 @dataclass(frozen=True)
@@ -260,6 +262,55 @@ DOC_REVIEWER = AgentProfile(
     },
 )
 
+TEACHER = AgentProfile(
+    name=BuiltinAgentName.TEACHER,
+    display_name="Teacher",
+    description="Author lessons by building a workflow graph (frame → generate → adapt → assess → bound)",
+    safety=AgentSafety.NEUTRAL,
+    agent_type=AgentType.AGENT,
+    overrides={
+        "enabled_tools": [
+            "run_pipeline",
+            "graph_inspect",
+            "graph_save_block",
+            "ask_user_question",
+        ],
+        "system_prompt_id": "teacher",
+        # Scope the pipeline tool to the lesson-authoring operator library — the teacher sees and
+        # may reference only that library's operators and blocks (a third artifact family on the
+        # same engine, and the source of the TutorContract that would bound a student tutor).
+        "tools": {
+            "run_pipeline": {"library": "teaching"},
+            "graph_save_block": {"library": "teaching"},
+        },
+    },
+)
+
+TUTOR = AgentProfile(
+    name=BuiltinAgentName.TUTOR,
+    display_name="Tutor",
+    description="Tutor a student inside a teacher-authored contract (bounded moves, no answers)",
+    safety=AgentSafety.NEUTRAL,
+    agent_type=AgentType.AGENT,
+    overrides={
+        # Deliberately NOT a graph author: no run_pipeline, no graph_patch. The tutor addresses the
+        # student only through `tutor_reply` (its hard gate) and may escalate to a human.
+        "enabled_tools": [
+            "tutor_reply",
+            "escalate_to_teacher",
+            "graph_inspect",
+            "ask_user_question",
+        ],
+        "system_prompt_id": "tutor",
+        # Where to load the TutorContract that bounds this session: a node id in the session's
+        # authored graph, a *.json path, or omitted (auto-detect the contract node). Same per-tool
+        # config channel the analyst/teacher use to scope run_pipeline.
+        "tools": {
+            "tutor_reply": {"contract": None},
+        },
+    },
+)
+
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.DEFAULT: DEFAULT,
     BuiltinAgentName.PLAN: PLAN,
@@ -270,4 +321,6 @@ BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.GRAPH: GRAPH,
     BuiltinAgentName.ANALYST: ANALYST,
     BuiltinAgentName.DOC_REVIEWER: DOC_REVIEWER,
+    BuiltinAgentName.TEACHER: TEACHER,
+    BuiltinAgentName.TUTOR: TUTOR,
 }

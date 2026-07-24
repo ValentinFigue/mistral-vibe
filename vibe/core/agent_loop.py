@@ -455,6 +455,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 self.skill_manager,
                 self.agent_manager,
                 scratchpad_dir=self.scratchpad_dir,
+                session_dir=self.session_logger.session_dir,
                 headless=self._headless,
                 experiment_manager=self.experiment_manager,
             )
@@ -654,6 +655,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self.skill_manager,
             self.agent_manager,
             scratchpad_dir=self.scratchpad_dir,
+            session_dir=self.session_logger.session_dir,
             headless=self._headless,
             experiment_manager=self.experiment_manager,
         )
@@ -1988,6 +1990,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self.skill_manager,
             self.agent_manager,
             scratchpad_dir=self.scratchpad_dir,
+            session_dir=self.session_logger.session_dir,
             headless=self._headless,
             experiment_manager=self.experiment_manager,
         )

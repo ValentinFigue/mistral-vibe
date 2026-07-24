@@ -45,6 +45,7 @@ from vibe.core.graph.executor import (
 from vibe.core.graph.fingerprint import content_hash
 import vibe.core.graph.library.analysis  # noqa: F401  (data-analysis operator kit + blocks)
 import vibe.core.graph.library.doc_reviewer  # noqa: F401  (document-review operator kit + blocks)
+import vibe.core.graph.library.teaching  # noqa: F401  (lesson-authoring operator kit + blocks)
 from vibe.core.graph.model import Graph, NodeId, Patch, Value
 from vibe.core.graph.operators import get_operator, is_registered, registered_operators
 from vibe.core.graph.patch import PatchError, apply_patch, changed_nodes

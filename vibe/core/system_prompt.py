@@ -336,7 +336,36 @@ def _get_graph_catalog_section(
     )
 
 
-def get_universal_system_prompt(  # noqa: PLR0912, PLR0914
+def _get_tutor_contract_section(
+    config: VibeConfig, agent_manager: AgentManager, session_dir: Path | None
+) -> str:
+    """The teacher-authored tutor contract's rules, embedded in the tutor's system prompt so it
+    operates inside the boundary from turn 1. Only the `tutor` profile gets it. Best-effort: if the
+    contract can't be located here it degrades to a generic note — enforcement still happens in the
+    `tutor_reply` tool on every turn.
+    """
+    from vibe.core.agents.models import BuiltinAgentName
+
+    if agent_manager.active_profile.name != BuiltinAgentName.TUTOR:
+        return ""
+    from vibe.core.tools.builtins._tutor import (
+        load_contract_for_prompt,
+        render_contract_rules,
+    )
+
+    locator = config.tools.get("tutor_reply", {}).get("contract")
+    contract = load_contract_for_prompt(locator, session_dir)
+    if contract is None:
+        return (
+            "# Your tutor contract\n\n"
+            "A teacher-authored contract bounds this session and is enforced on every `tutor_reply` "
+            "(off-contract moves and premature answer-reveals are withheld). Its specific rules will "
+            "apply automatically — call `tutor_reply` and heed any correction it returns."
+        )
+    return render_contract_rules(contract)
+
+
+def get_universal_system_prompt(  # noqa: PLR0912, PLR0914, PLR0915
     tool_manager: ToolManager,
     config: VibeConfig,
     skill_manager: SkillManager,
@@ -344,6 +373,7 @@ def get_universal_system_prompt(  # noqa: PLR0912, PLR0914
     *,
     include_git_status: bool = True,
     scratchpad_dir: Path | None = None,
+    session_dir: Path | None = None,
     headless: bool = False,
     experiment_manager: ExperimentManager | None = None,
 ) -> str:
@@ -370,6 +400,10 @@ def get_universal_system_prompt(  # noqa: PLR0912, PLR0914
         graph_catalog = _get_graph_catalog_section(tool_manager, config, agent_manager)
         if graph_catalog:
             sections.append(graph_catalog)
+
+        tutor_contract = _get_tutor_contract_section(config, agent_manager, session_dir)
+        if tutor_contract:
+            sections.append(tutor_contract)
 
         skills_section = _get_available_skills_section(skill_manager)
         if skills_section:

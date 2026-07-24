@@ -103,7 +103,17 @@ class MCPSamplingHandler:
             extra_headers=(None if self._extra_headers_getter is None else self._extra_headers_getter()),
             metadata=(None if self._metadata_getter is None else self._metadata_getter()),
         )
-        return result.message.content or ""
+        content = result.message.content or ""
+        # A reasoning model spends the same max_tokens budget on reasoning first; if the budget runs
+        # out before it emits an answer, `content` is empty while `reasoning_content` is populated.
+        # Surface that instead of failing silently (the callers guard/validate an empty result).
+        if not content and getattr(result.message, "reasoning_content", None):
+            logger.warning(
+                "complete_text: empty content but non-empty reasoning at max_tokens=%d — the answer "
+                "was likely cut off by reasoning; raise max_tokens for this call.",
+                max_tokens,
+            )
+        return content
 
 
 def _map_sampling_messages(messages: list[Any]) -> list[LLMMessage]:

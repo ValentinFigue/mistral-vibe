@@ -1004,7 +1004,7 @@ async def narrate(
         "invent nothing — if the data doesn't show it, don't say it.\n\n"
         f"{data_text}{note}"
     )
-    text = await llm(prompt, system="You are a precise data analyst.", max_tokens=512)
+    text = await llm(prompt, system="You are a precise data analyst.", max_tokens=2048)
     return Report(markdown=text.strip())
 
 
@@ -1038,7 +1038,7 @@ async def classify(
         f"Return ONLY a JSON array of {len(values)} strings — one label per item, in order, "
         f"no prose.\n\nItems:\n{numbered}"
     )
-    raw = await llm(prompt, system="You label data. Output only a JSON array of labels.", max_tokens=2048)
+    raw = await llm(prompt, system="You label data. Output only a JSON array of labels.", max_tokens=4096)
     try:
         parsed = json.loads(raw[raw.index("[") : raw.rindex("]") + 1])
     except (ValueError, json.JSONDecodeError) as exc:

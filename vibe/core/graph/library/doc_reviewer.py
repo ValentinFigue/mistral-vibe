@@ -286,7 +286,7 @@ async def extract_clauses(
         f"that matches none.\n\nSections:\n{_numbered_sections(sections)}"
     )
     raw = await llm(
-        prompt, system="You extract contract clauses. Output only a JSON array.", max_tokens=2048
+        prompt, system="You extract contract clauses. Output only a JSON array.", max_tokens=4096
     )
     allowed = set(types)
     items: list[Finding] = []
@@ -328,7 +328,7 @@ async def classify_risk(
         f"Clauses:\n{_numbered_findings(items)}"
     )
     raw = await llm(
-        prompt, system="You assess contract risk. Output only a JSON array.", max_tokens=2048
+        prompt, system="You assess contract risk. Output only a JSON array.", max_tokens=4096
     )
     parsed = _parse_json_array(raw, "classify_risk")
     if len(parsed) != len(items):
@@ -379,7 +379,7 @@ async def compare_to_playbook(
     raw = await llm(
         prompt,
         system="You compare contract clauses to a playbook. Output only a JSON array.",
-        max_tokens=2048,
+        max_tokens=4096,
     )
     parsed = _parse_json_array(raw, "compare_to_playbook")
     if len(parsed) != len(items):
@@ -423,7 +423,7 @@ async def summarize_document(doc: Document, goal: str = "", llm: LLMCaller | Non
         "statement in the text and invent nothing — if a term isn't stated, don't claim it.\n\n"
         f"{body}"
     )
-    text = await llm(prompt, system="You are a precise contract reviewer.", max_tokens=512)
+    text = await llm(prompt, system="You are a precise contract reviewer.", max_tokens=2048)
     return Report(markdown=text.strip())
 
 
@@ -489,7 +489,7 @@ async def redline(findings: Findings, llm: LLMCaller | None = None) -> Report:
         "Return a short markdown memo, no preamble.\n\n"
         f"Clauses:\n{detail}"
     )
-    text = await llm(prompt, system="You are a precise contract reviewer.", max_tokens=1024)
+    text = await llm(prompt, system="You are a precise contract reviewer.", max_tokens=2048)
     return Report(markdown=text.strip())
 
 

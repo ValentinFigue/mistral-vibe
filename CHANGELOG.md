@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **[Experimental / internal]** Métier LLM operators returned **empty output on a reasoning model**. The default `mistral-medium-3.5` emits a separate `reasoning_content`, and the graph LLM caller `MCPSamplingHandler.complete_text` passes `max_tokens` as the *total* budget — so a small cap (`summarize_document`/`narrate` used 512) was spent on reasoning tokens and the visible `content` came back empty, silently. Raised the per-op budgets (summarize/narrate 512→2048; extract/classify/compare 2048→4096) and made `complete_text` log a warning when it returns empty content while `reasoning_content` is populated (so the failure is visible, never silent). Note: extraction over a very large document can still exhaust the budget — `filter_sections` first (the prompt already advises this), and the op now raises a clear error instead of yielding empty findings.
 - **[Experimental / internal]** Métier analyst — `describe`/`correlation` label column renamed `column` → `field`: `column` is a SQL reserved word, so a downstream `sql("SELECT column … FROM t1")` failed at parse time (seen in a live session). `field` selects cleanly. `CACHE_VERSION` bumped 2 → 3 (output shape changed). The prompt also clarifies that `narrate`/`classify` take a **table** (a `describe`/`correlation`/`group_by`/`sql` output), not a block or report.
 
 ## [2.15.0] - 2026-06-12

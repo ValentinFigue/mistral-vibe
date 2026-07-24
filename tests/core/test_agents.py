@@ -265,7 +265,7 @@ class TestAgentManager:
         tm = ToolManager(lambda: applied, defer_mcp=True)
         am = AgentManager(lambda: base, initial_agent="doc-reviewer")
         section = _get_graph_catalog_section(tm, applied, am)
-        assert "read_document" in section and "risk_review" in section  # documents library
+        assert "extract_segments" in section and "contract_review" in section  # documents library
         assert "read_csv" not in section and "quick_profile" not in section  # analysis library excluded
 
     def test_install_required_agent_reports_install_not_disabled_agents(self) -> None:

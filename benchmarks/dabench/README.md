@@ -68,14 +68,46 @@ uv run vibe -p "<question + constraints + exact @name[value] format instructions
 `--max-price` caps spend per question (default $1, `0` disables the cap) — check the
 smoke test's actual cost before running the full 257-question set unbounded.
 
-Progress and per-question failures are logged to stderr. Results are written
-incrementally to `benchmarks/dabench/responses.jsonl` (gitignored) as
-`{"id": .., "response": ".."}`, one line per question, so a crash mid-run doesn't lose
-completed work.
+Progress and per-question failures are logged to stderr. Results are written to
+`benchmarks/dabench/responses.jsonl` (gitignored) as `{"id": .., "response": ".."}`, one
+line per question, rewritten atomically (temp file + rename) after every completion —
+a crash mid-run never leaves a partial/corrupt file.
+
+### Resuming
+
+**Rerunning against the same `--out` is safe and resumes by default** — it no longer
+overwrites the file from scratch. Any question `id` that already has a non-empty
+response is skipped; only missing or previously-failed (empty-response) ids are (re)run,
+and the final file always contains every id seen so far, each exactly once. This is a
+behavior change from the original version of this script, which unconditionally
+truncated `--out` on every invocation.
+
+- `--overwrite` — ignore the existing `--out` file entirely and recompute everything
+  selected from scratch (use after a prompt-template or agent-profile change makes old
+  answers stale).
+- `--skip-failed` — on resume, also skip ids that previously came back empty instead of
+  retrying them (default: retry them, since an empty response isn't a usable result). No
+  effect when combined with `--overwrite`.
+- Widening a run incrementally: `--limit` is applied *before* resume-filtering (it means
+  "the first N questions from the dataset file"), so e.g. running `--limit 10` and then
+  later `--limit 50` only executes questions 11-50, not 1-50 again.
+
+Caveats:
+- Don't run two instances of `run_dabench.py` against the same `--out` at once — there's
+  no file locking; each process loads its own snapshot at startup and the last process to
+  finish a write wins, which can silently drop the other process's newly-added ids.
+- Pointing `--out` at a file produced by a *different* `--questions` file will merge
+  unrelated ids into one file rather than erroring. Use a separate `--out` path (or
+  `--overwrite`) when switching datasets.
 
 Useful flags: `--limit N`, `--concurrency N`, `--max-turns N`, `--max-price USD`,
 `--timeout SECONDS` (per-question subprocess timeout), `--keep-tmp` (don't delete
-temp workdirs, for debugging a specific question).
+temp workdirs, for debugging a specific question), `--overwrite`, `--skip-failed`.
+
+Concurrency is capped by your LLM-API rate limits, which this script can't see — the
+default (`--concurrency 4`) is conservative; raise it if your account's tier allows.
+Resume means a rerun only submits the questions actually still needed, so the same
+`--concurrency` finishes proportionally faster on a partially-completed run.
 
 ## Scoring
 

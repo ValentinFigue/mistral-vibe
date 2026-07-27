@@ -265,6 +265,33 @@ def nodes_table(
     return "\n".join(rows)
 
 
+# Order in which operator categories are shown; unknown categories (and untagged ops, bucketed as
+# "other") are appended after, alphabetically. Grouping is opt-in: a catalog whose ops carry no
+# category renders as a flat sorted list (unchanged behaviour for untagged libraries).
+_CATEGORY_ORDER = (
+    "load", "shape", "transform", "statistics", "inference",
+    "ml", "quality", "sql", "report", "insight",
+)
+
+
+def _catalog_op_line(name: str, spec: OperatorSpec, verbose: bool) -> str:
+    """One operator's catalog line: ``name(inputs: …; params: …) → ResultType`` (+ description)."""
+    def one(a: str) -> str:  # optional params shown as name:type=default so the agent may omit them
+        base = f"{a}:{spec.arg_types.get(a, '?')}"
+        return f"{base}={spec.defaults[a]!r}" if a in spec.defaults else base
+
+    def typed(argnames: tuple[str, ...]) -> str:
+        return ", ".join(one(a) for a in argnames) or "—"
+
+    line = (
+        f"- {name}(inputs: {typed(spec.input_names)}; "
+        f"params: {typed(spec.literal_names())}) → {spec.result_type.__name__}"
+    )
+    if verbose and spec.description:
+        line += f"\n    {spec.description}"
+    return line
+
+
 def operators_catalog(
     operators: Mapping[str, OperatorSpec],
     blocks: Mapping[str, BlockDef],
@@ -276,27 +303,24 @@ def operators_catalog(
     Each param renders as ``name:type[=default]``; for enum params the type is the allowed values
     (e.g. ``model:logreg|tree|rf``) since they're annotated ``Literal[...]``. ``verbose=True`` (used
     by the agent catalog and ``/operators``) appends each op's one-line description; ``verbose=False``
-    omits it.
+    omits it. When operators carry a ``category`` they are grouped under ``[category]`` headers (in
+    ``_CATEGORY_ORDER``); an all-untagged catalog renders as one flat sorted list.
     """
+    from collections import defaultdict
+
     lines = ["Available operators (inputs are wired from nodes; params are literals):"]
-    for name, spec in sorted(operators.items()):
-
-        def typed(argnames: tuple[str, ...], _spec: OperatorSpec = spec) -> str:
-            # Optional params (with a default) are shown as ``name:type=default`` so the agent
-            # knows it may omit them.
-            def one(a: str) -> str:
-                base = f"{a}:{_spec.arg_types.get(a, '?')}"
-                return f"{base}={_spec.defaults[a]!r}" if a in _spec.defaults else base
-
-            return ", ".join(one(a) for a in argnames) or "—"
-
-        line = (
-            f"- {name}(inputs: {typed(spec.input_names)}; "
-            f"params: {typed(spec.literal_names())}) → {spec.result_type.__name__}"
-        )
-        if verbose and spec.description:
-            line += f"\n    {spec.description}"
-        lines.append(line)
+    if any(spec.category for spec in operators.values()):
+        groups: dict[str, list[tuple[str, OperatorSpec]]] = defaultdict(list)
+        for name, spec in operators.items():
+            groups[spec.category or "other"].append((name, spec))
+        ordered = [c for c in _CATEGORY_ORDER if c in groups]
+        ordered += sorted(c for c in groups if c not in _CATEGORY_ORDER)  # unknowns + "other" last
+        for cat in ordered:
+            lines.append("")
+            lines.append(f"[{cat}]")
+            lines += [_catalog_op_line(n, s, verbose) for n, s in sorted(groups[cat])]
+    else:
+        lines += [_catalog_op_line(n, s, verbose) for n, s in sorted(operators.items())]
     lines.append("")
     lines.append("Available blocks (reusable subgraphs — inputs / params):")
     for name, block in sorted(blocks.items()):

@@ -43,6 +43,7 @@ class OperatorSpec:
     arg_types: dict[str, str] = field(default_factory=dict)  # arg name -> readable type
     description: str = ""  # first docstring line
     library: str | None = None  # catalog-scoping tag; None = untagged (generic/kitchen-sink)
+    category: str | None = None  # optional catalog sub-group (e.g. "statistics"); None = ungrouped
     reads_file: str | None = None  # name of a path param whose file content is fingerprinted
     needs_llm: bool = False  # op declares an `llm` param the executor injects at run time
     defaults: dict[str, Any] = field(default_factory=dict)  # params with a signature default (optional)
@@ -122,6 +123,7 @@ def operator(
     library: str | None = None,
     reads_file: str | None = None,
     needs_llm: bool = False,
+    category: str | None = None,
 ) -> Any:
     """Register an async operator. Usable as ``@operator`` or ``@operator(name=...)``.
 
@@ -175,6 +177,7 @@ def operator(
             arg_types=arg_types,
             description=description,
             library=library,
+            category=category,
             reads_file=reads_file,
             needs_llm=needs_llm,
             defaults=defaults,

@@ -47,6 +47,55 @@ _SAMPLE_DATASETS = ("sales", "customers")
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _NUMERIC_AGGS = ("sum", "mean", "min", "max")  # + "count" handled separately
 
+# Catalog sub-groups (rendered as [category] headers, ordered by render._CATEGORY_ORDER) — one place
+# to keep the taxonomy that the analyst prompt mirrors. Every analysis op is tagged here via `_op`.
+_CATEGORY_BY_OP = {
+    # load
+    "read_csv": "load", "sample_dataset": "load",
+    # clean / reshape / derive
+    "select_columns": "shape", "rename_columns": "shape", "drop_missing": "shape",
+    "filter_rows": "shape", "sort_rows": "shape", "limit": "shape", "distinct": "shape",
+    "derive_column": "shape", "date_part": "shape", "join": "shape", "concat": "shape",
+    "pivot": "shape", "melt": "shape", "group_by": "shape", "top_n": "shape", "rank": "shape",
+    "bin": "shape", "pct_change": "shape", "rolling": "shape",
+    # feature transforms
+    "cast_column": "transform", "fill_missing": "transform", "normalize": "transform",
+    "encode": "transform",
+    # descriptive statistics
+    "describe": "statistics", "quantile": "statistics", "distribution": "statistics",
+    "correlation": "statistics", "value_counts": "statistics", "outliers": "statistics",
+    # inferential statistics
+    "corr_test": "inference", "normality_test": "inference", "group_test": "inference",
+    "chi_square": "inference",
+    # machine learning
+    "ml_regression": "ml", "ml_classification": "ml", "ml_cluster": "ml",
+    "feature_importance": "ml", "ml_predict": "ml",
+    # data-quality gates
+    "expect_columns": "quality", "expect_no_nulls": "quality", "expect_unique": "quality",
+    # sql
+    "sql": "sql",
+    # report / sink
+    "to_markdown": "report", "to_csv": "report", "answer": "report", "chart": "report",
+    # llm insight
+    "narrate": "insight", "classify": "insight",
+}
+
+
+def _op(  # noqa: ANN202 (decorator factory)
+    *, name: str | None = None, needs_llm: bool = False, reads_file: str | None = None
+):
+    """``@operator`` scoped to this library, auto-tagging the op's ``category`` from
+    ``_CATEGORY_BY_OP`` so the catalog groups it — the single place the taxonomy lives.
+    """
+    def wrap(fn: Any) -> Any:
+        op_name = name or fn.__name__
+        return operator(
+            library=_LIB, category=_CATEGORY_BY_OP.get(op_name),
+            name=name, needs_llm=needs_llm, reads_file=reads_file,
+        )(fn)
+
+    return wrap
+
 
 class Table(BaseModel):
     """A tabular value: an ordered column list and rows keyed by exactly those columns."""
@@ -184,7 +233,7 @@ def _parse_csv(text: str) -> Table:
 # --- load ----------------------------------------------------------------------------------
 
 
-@operator(library=_LIB, reads_file="path")
+@_op(reads_file="path")
 async def read_csv(path: str, content_fp: str) -> Table:
     """Load a CSV file into a table (column types inferred). Supply only ``path`` — the tool
     fingerprints the file (``content_fp``) so an edit re-runs the dependent subgraph.
@@ -201,7 +250,7 @@ async def read_csv(path: str, content_fp: str) -> Table:
     return _parse_csv(p.read_text())
 
 
-@operator(library=_LIB)
+@_op()
 async def sample_dataset(name: str) -> Table:
     """Load a bundled sample dataset by name (no file path needed). Datasets: sales, customers."""
     if name not in _SAMPLE_DATASETS:
@@ -213,7 +262,7 @@ async def sample_dataset(name: str) -> Table:
 # --- clean / shape -------------------------------------------------------------------------
 
 
-@operator(library=_LIB)
+@_op()
 async def select_columns(table: Table, columns: list[str]) -> Table:
     """Keep only the named columns, in the given order."""
     columns = _cols(columns)
@@ -221,7 +270,7 @@ async def select_columns(table: Table, columns: list[str]) -> Table:
     return _table(columns, table.rows)
 
 
-@operator(library=_LIB)
+@_op()
 async def rename_columns(table: Table, mapping: dict[str, str]) -> Table:
     """Rename columns via an {old: new} mapping."""
     _need(table, *mapping.keys())
@@ -230,7 +279,7 @@ async def rename_columns(table: Table, mapping: dict[str, str]) -> Table:
     return _table(new_cols, rows)
 
 
-@operator(library=_LIB)
+@_op()
 async def cast_column(table: Table, column: str, type: Literal["int", "float", "str"]) -> Table:
     """Cast a column to ``int``, ``float``, or ``str`` (blank/invalid → None for numerics)."""
     _need(table, column)
@@ -251,7 +300,7 @@ async def cast_column(table: Table, column: str, type: Literal["int", "float", "
     return _table(table.columns, rows)
 
 
-@operator(library=_LIB)
+@_op()
 async def drop_missing(table: Table, columns: list[str] | None = None) -> Table:
     """Drop rows with a missing (None/blank) value in any of ``columns`` (empty → all columns)."""
     check = _cols(columns) or table.columns
@@ -273,7 +322,7 @@ def _compare(cell: Any, op: str, value: Any) -> bool:
     return ops[op](cell, value)
 
 
-@operator(library=_LIB)
+@_op()
 async def filter_rows(
     table: Table,
     column: str,
@@ -303,20 +352,20 @@ def _sorted_non_null_first(rows: list[dict[str, Any]], by: str, descending: bool
     return present + missing
 
 
-@operator(library=_LIB)
+@_op()
 async def sort_rows(table: Table, by: str, descending: bool = False) -> Table:
     """Sort rows by a column (None always sorts last)."""
     _need(table, by)
     return _table(table.columns, _sorted_non_null_first(table.rows, by, descending))
 
 
-@operator(library=_LIB)
+@_op()
 async def limit(table: Table, n: int) -> Table:
     """Keep the first ``n`` rows."""
     return _table(table.columns, table.rows[: max(0, n)])
 
 
-@operator(library=_LIB)
+@_op()
 async def distinct(table: Table, columns: list[str] | None = None) -> Table:
     """Drop duplicate rows (by ``columns``, or all columns when empty)."""
     keys = _cols(columns) or table.columns
@@ -347,7 +396,7 @@ _DERIVE_OPS: dict[str, Any] = {
 }
 
 
-@operator(library=_LIB)
+@_op()
 async def derive_column(
     table: Table,
     name: str,
@@ -376,7 +425,7 @@ async def derive_column(
     return _table(cols, rows)
 
 
-@operator(library=_LIB)
+@_op()
 async def date_part(
     table: Table, column: str, part: Literal["year", "month", "day", "weekday"]
 ) -> Table:
@@ -407,7 +456,7 @@ async def date_part(
 # --- combine -------------------------------------------------------------------------------
 
 
-@operator(library=_LIB)
+@_op()
 async def join(left: Table, right: Table, on: str, how: Literal["inner", "left"] = "inner") -> Table:
     """Join two tables on a shared column (a real SQL join via pandas). how ∈ inner, left.
 
@@ -422,7 +471,7 @@ async def join(left: Table, right: Table, on: str, how: Literal["inner", "left"]
     return _from_df(merged)
 
 
-@operator(library=_LIB)
+@_op()
 async def sql(query: str, t1: Table, t2: Table | None = None, t3: Table | None = None) -> Table:
     """Run a DuckDB SQL query over the wired tables — the workhorse for filter/join/group/pivot/
     window in one step. Reference the inputs by port name: ``t1`` (the piped/primary input), and
@@ -448,7 +497,7 @@ async def sql(query: str, t1: Table, t2: Table | None = None, t3: Table | None =
 # --- aggregate / analyze -------------------------------------------------------------------
 
 
-@operator(library=_LIB)
+@_op()
 async def group_by(
     table: Table,
     keys: list[str],
@@ -498,7 +547,7 @@ async def group_by(
     return _from_df(pd.DataFrame(out_rows, columns=out_cols))
 
 
-@operator(library=_LIB)
+@_op()
 async def describe(table: Table, columns: list[str] | None = None) -> Table:
     """Summary stats per numeric column (empty → all numeric): count, mean, std, min, p25,
     median, p75, max.
@@ -530,7 +579,7 @@ async def describe(table: Table, columns: list[str] | None = None) -> Table:
     return _from_df(pd.DataFrame(rows, columns=out_cols))
 
 
-@operator(library=_LIB)
+@_op()
 async def value_counts(table: Table, column: str) -> Table:
     """Frequency of each distinct value in ``column``, most frequent first."""
     _need(table, column)
@@ -541,7 +590,7 @@ async def value_counts(table: Table, column: str) -> Table:
     return _table(["value", "count"], rows)
 
 
-@operator(library=_LIB)
+@_op()
 async def top_n(table: Table, by: str, n: int = 10) -> Table:
     """The top ``n`` rows by ``by`` (descending; None-valued rows never count as top)."""
     _need(table, by)
@@ -552,7 +601,7 @@ async def top_n(table: Table, by: str, n: int = 10) -> Table:
 # --- reshape / window / stats (pandas-backed) ----------------------------------------------
 
 
-@operator(library=_LIB)
+@_op()
 async def pivot(
     table: Table,
     index: str,
@@ -575,7 +624,7 @@ async def pivot(
     return _from_df(pt.reset_index())
 
 
-@operator(library=_LIB)
+@_op()
 async def melt(
     table: Table, id_vars: list[str], value_vars: list[str] | None = None,
     var_name: str = "variable", value_name: str = "value",
@@ -589,7 +638,7 @@ async def melt(
     )
 
 
-@operator(library=_LIB)
+@_op()
 async def concat(top: Table, bottom: Table) -> Table:
     """Stack two tables' rows (union). Columns are the union; missing cells become null."""
     import pandas as pd
@@ -597,7 +646,7 @@ async def concat(top: Table, bottom: Table) -> Table:
     return _from_df(pd.concat([_to_df(top), _to_df(bottom)], ignore_index=True))
 
 
-@operator(library=_LIB)
+@_op()
 async def fill_missing(
     table: Table,
     column: str,
@@ -629,7 +678,7 @@ async def fill_missing(
     return _from_df(df)
 
 
-@operator(library=_LIB)
+@_op()
 async def normalize(
     table: Table,
     column: str,
@@ -657,7 +706,7 @@ async def normalize(
     return _from_df(df)
 
 
-@operator(library=_LIB)
+@_op()
 async def encode(
     table: Table,
     column: str,
@@ -684,7 +733,7 @@ async def encode(
     return _from_df(df)
 
 
-@operator(library=_LIB)
+@_op()
 async def rank(
     table: Table,
     by: str,
@@ -704,7 +753,7 @@ async def rank(
     return _from_df(df)
 
 
-@operator(name="bin", library=_LIB)
+@_op(name="bin")
 async def bin_column(table: Table, column: str, bins: int = 4, name: str | None = None) -> Table:
     """Bucket a numeric ``column`` into ``bins`` equal-width bins; adds a label column."""
     import pandas as pd
@@ -716,7 +765,7 @@ async def bin_column(table: Table, column: str, bins: int = 4, name: str | None 
     return _from_df(df)
 
 
-@operator(library=_LIB)
+@_op()
 async def correlation(
     table: Table,
     columns: list[str] | None = None,
@@ -751,7 +800,7 @@ _TWO_GROUPS = 2  # ttest/welch/mannwhitney compare exactly two groups
 _MIN_CATEGORIES = 2  # chi-square needs a ≥2×2 contingency table
 
 
-@operator(library=_LIB)
+@_op()
 async def corr_test(
     table: Table,
     x: str,
@@ -775,7 +824,7 @@ async def corr_test(
     return _from_df(pd.DataFrame([{"coefficient": float(res[0]), "p_value": float(res[1]), "n": len(df)}]))
 
 
-@operator(library=_LIB)
+@_op()
 async def normality_test(
     table: Table,
     column: str,
@@ -814,7 +863,7 @@ async def normality_test(
     return _from_df(pd.DataFrame([{"statistic": stat, "p_value": p_value, "critical_value": critical}]))
 
 
-@operator(library=_LIB)
+@_op()
 async def group_test(
     table: Table,
     value: str,
@@ -854,7 +903,7 @@ async def group_test(
     return _from_df(pd.DataFrame([{"statistic": float(res[0]), "p_value": float(res[1]), "n_groups": n_groups}]))
 
 
-@operator(library=_LIB)
+@_op()
 async def chi_square(table: Table, column1: str, column2: str) -> Table:
     """Chi-square test of independence between two categorical columns — a 1-row table
     (``statistic``, ``p_value``, ``dof``), from the contingency table of the two columns.
@@ -873,7 +922,7 @@ async def chi_square(table: Table, column1: str, column2: str) -> Table:
     return _from_df(pd.DataFrame([{"statistic": float(chi2), "p_value": float(p_value), "dof": int(dof)}]))
 
 
-@operator(library=_LIB)
+@_op()
 async def pct_change(table: Table, column: str, name: str | None = None) -> Table:
     """Row-over-row percent change of a numeric ``column`` (adds ``{column}_pct_change``)."""
     import pandas as pd
@@ -885,7 +934,7 @@ async def pct_change(table: Table, column: str, name: str | None = None) -> Tabl
     return _from_df(df)
 
 
-@operator(library=_LIB)
+@_op()
 async def rolling(
     table: Table,
     column: str,
@@ -908,7 +957,7 @@ async def rolling(
     return _from_df(df)
 
 
-@operator(library=_LIB)
+@_op()
 async def quantile(table: Table, column: str, q: float) -> Table:
     """The ``q``-quantile (``q`` in [0, 1]) of a numeric ``column`` — a 1×1 table (``quantile``)."""
     import pandas as pd
@@ -921,46 +970,41 @@ async def quantile(table: Table, column: str, q: float) -> Table:
     return _from_df(pd.DataFrame([{"quantile": val}]).round(4))
 
 
-@operator(library=_LIB)
-async def outliers_iqr(table: Table, column: str, k: float = 1.5) -> Table:
-    """IQR outliers of a numeric ``column``: values outside [Q1 − k·IQR, Q3 + k·IQR].
-
-    Returns a 1-row summary — ``lower``, ``upper`` (the fences), ``count`` (outliers), ``total``.
+@_op()
+async def outliers(
+    table: Table,
+    column: str,
+    method: Literal["iqr", "zscore"] = "iqr",
+    factor: float | None = None,
+) -> Table:
+    """Outliers of a numeric ``column`` — a 1-row summary: ``lower``, ``upper`` (the fences),
+    ``count`` (values outside them), ``total``. method ∈ iqr (fences Q1−k·IQR / Q3+k·IQR) or zscore
+    (mean ± k·std, population ddof=0). ``factor`` is k — defaults to 1.5 (iqr) or 3.0 (zscore).
     """
     import pandas as pd
 
-    _require_numeric(table, column, "outliers_iqr")
+    if method not in {"iqr", "zscore"}:
+        raise ValueError(f"outliers: method must be iqr/zscore, got {method!r}")
+    _require_numeric(table, column, "outliers")
     s = pd.to_numeric(_to_df(table)[column], errors="coerce").dropna()
     if s.empty:
         return _from_df(pd.DataFrame([{"lower": None, "upper": None, "count": 0, "total": 0}]))
-    q1, q3 = float(s.quantile(0.25)), float(s.quantile(0.75))
-    iqr = q3 - q1
-    lower, upper = q1 - k * iqr, q3 + k * iqr
-    count = int(((s < lower) | (s > upper)).sum())
+    if method == "iqr":
+        k = 1.5 if factor is None else factor
+        q1, q3 = float(s.quantile(0.25)), float(s.quantile(0.75))
+        iqr = q3 - q1
+        lower, upper = q1 - k * iqr, q3 + k * iqr
+        count = int(((s < lower) | (s > upper)).sum())
+    else:
+        k = 3.0 if factor is None else factor
+        mean, sd = float(s.mean()), float(s.std(ddof=0))
+        lower, upper = mean - k * sd, mean + k * sd
+        count = int(((s < lower) | (s > upper)).sum()) if sd else 0
     row = {"lower": round(lower, 4), "upper": round(upper, 4), "count": count, "total": int(len(s))}
     return _from_df(pd.DataFrame([row]))
 
 
-@operator(library=_LIB)
-async def outliers_zscore(table: Table, column: str, threshold: float = 3.0) -> Table:
-    """Z-score outliers of a numeric ``column``: values with ``|z| > threshold`` where
-    ``z = (x − mean) / std`` (population std, ddof=0). Returns a 1-row summary — ``lower``, ``upper``
-    (the fences), ``count`` (outliers), ``total``.
-    """
-    import pandas as pd
-
-    _require_numeric(table, column, "outliers_zscore")
-    s = pd.to_numeric(_to_df(table)[column], errors="coerce").dropna()
-    if s.empty:
-        return _from_df(pd.DataFrame([{"lower": None, "upper": None, "count": 0, "total": 0}]))
-    mean, sd = float(s.mean()), float(s.std(ddof=0))
-    lower, upper = mean - threshold * sd, mean + threshold * sd
-    count = int(((s < lower) | (s > upper)).sum()) if sd else 0
-    row = {"lower": round(lower, 4), "upper": round(upper, 4), "count": count, "total": int(len(s))}
-    return _from_df(pd.DataFrame([row]))
-
-
-@operator(library=_LIB)
+@_op()
 async def distribution(table: Table, column: str) -> Table:
     """Shape of a numeric ``column`` — a 1-row table: mean, std, skewness, kurtosis (Fisher)."""
     import pandas as pd
@@ -1155,7 +1199,7 @@ def _evaluate_estimator(
     return float(scorer(y_te, est.predict(x_te)))
 
 
-@operator(library=_LIB)
+@_op()
 async def ml_regression(  # noqa: PLR0913, PLR0917 (typed ML knobs; executor binds by keyword)
     table: Table,
     target: str,
@@ -1193,7 +1237,7 @@ async def ml_regression(  # noqa: PLR0913, PLR0917 (typed ML knobs; executor bin
     return _score_table(score)
 
 
-@operator(library=_LIB)
+@_op()
 async def ml_classification(  # noqa: PLR0913, PLR0917 (typed ML knobs; executor binds by keyword)
     table: Table,
     target: str,
@@ -1229,7 +1273,7 @@ async def ml_classification(  # noqa: PLR0913, PLR0917 (typed ML knobs; executor
     return _score_table(score)
 
 
-@operator(library=_LIB)
+@_op()
 async def ml_cluster(
     table: Table,
     features: list[str],
@@ -1277,7 +1321,7 @@ def _fi_estimator(model: str, task: str, random_state: int):  # noqa: ANN202 (sk
     return LogisticRegression(max_iter=1000, random_state=random_state)
 
 
-@operator(library=_LIB)
+@_op()
 async def feature_importance(
     table: Table,
     target: str,
@@ -1321,7 +1365,7 @@ async def feature_importance(
     return _table(["field", "importance"], rows)
 
 
-@operator(library=_LIB)
+@_op()
 async def ml_predict(  # noqa: PLR0914, PLR0913, PLR0917 (typed ML knobs; executor binds by keyword)
     table: Table,
     target: str,
@@ -1409,7 +1453,7 @@ def _table_text(table: Table, max_rows: int) -> tuple[str, bool]:
     return f"{header}\n{body}", len(table.rows) > max_rows
 
 
-@operator(library=_LIB, needs_llm=True)
+@_op(needs_llm=True)
 async def narrate(
     table: Table, goal: str = "", max_rows: int = _MAX_NARRATE_ROWS, llm: LLMCaller | None = None
 ) -> Report:
@@ -1431,7 +1475,7 @@ async def narrate(
     return Report(markdown=text.strip())
 
 
-@operator(library=_LIB, needs_llm=True)
+@_op(needs_llm=True)
 async def classify(
     table: Table,
     column: str,
@@ -1481,7 +1525,7 @@ async def classify(
 # --- data-quality gates --------------------------------------------------------------------
 
 
-@operator(library=_LIB)
+@_op()
 async def expect_columns(table: Table, columns: list[str]) -> Table:
     """Assert the table has the named columns; pass it through unchanged, else fail with a
     clear error the agent can act on.
@@ -1492,7 +1536,7 @@ async def expect_columns(table: Table, columns: list[str]) -> Table:
     return table
 
 
-@operator(library=_LIB)
+@_op()
 async def expect_no_nulls(table: Table, columns: list[str] | None = None) -> Table:
     """Assert no missing (None/blank) values in ``columns`` (or all); pass through unchanged."""
     check = _cols(columns) or table.columns
@@ -1504,7 +1548,7 @@ async def expect_no_nulls(table: Table, columns: list[str] | None = None) -> Tab
     return table
 
 
-@operator(library=_LIB)
+@_op()
 async def expect_unique(table: Table, columns: list[str]) -> Table:
     """Assert the given columns form a unique key; pass through unchanged."""
     keys = _cols(columns)
@@ -1523,7 +1567,7 @@ async def expect_unique(table: Table, columns: list[str]) -> Table:
 # --- sinks (write a file, return a small handle) -------------------------------------------
 
 
-@operator(library=_LIB)
+@_op()
 async def to_csv(table: Table, path: str) -> ExportResult:
     """Write the table to a CSV file at ``path``; returns a handle (path + shape), not the data.
 
@@ -1562,150 +1606,117 @@ def _save_fig(fig, path: str, kind: str) -> ChartResult:  # noqa: ANN001 (matplo
     return ChartResult(path=str(p), kind=kind)
 
 
-@operator(library=_LIB)
-async def bar_chart(table: Table, x: str, y: str, path: str, title: str = "Chart") -> ChartResult:
-    """Render a bar chart (``x`` categories, numeric ``y``) to a PNG at ``path``; returns a handle."""
-    plt, pd = _mpl()
-    _need(table, x, y)
-    df = _to_df(table)
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
-    ax.bar(df[x].astype("str"), pd.to_numeric(df[y], errors="coerce"))
-    ax.set_title(title), ax.set_xlabel(x), ax.set_ylabel(y)
-    fig.autofmt_xdate()
-    return _save_fig(fig, path, "bar")
-
-
-@operator(library=_LIB)
-async def line_chart(
-    table: Table, x: str, y: str, path: str, title: str = "Chart", series: str = ""
+@_op()
+async def chart(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915 (one dispatch op over 7 chart kinds)
+    table: Table,
+    kind: Literal["bar", "line", "scatter", "histogram", "box", "pie", "heatmap"],
+    path: str,
+    x: str = "",
+    y: str = "",
+    column: str = "",
+    by: str = "",
+    series: str = "",
+    labels: str = "",
+    values: str = "",
+    bins: int = 20,
+    max_slices: int = 8,
+    title: str = "",
 ) -> ChartResult:
-    """Render a line chart (``x`` vs numeric ``y``) to a PNG at ``path``; returns a handle.
-
-    Set ``series`` to a column to draw one line per distinct value (a multi-series chart).
+    """Render a chart to a PNG at ``path``; returns a small handle (image bytes stay out of context).
+    Required params per ``kind``: **bar/line/scatter** need ``x`` + ``y`` (line adds optional
+    ``series`` for one line per value); **histogram** needs ``column`` (+ ``bins``); **box** needs
+    ``column`` (+ optional ``by``); **pie** needs ``labels`` + ``values`` (+ ``max_slices``);
+    **heatmap** plots the table's numeric matrix (e.g. a ``correlation``/``pivot`` output).
     """
     plt, pd = _mpl()
-    _need(table, x, y)
     df = _to_df(table)
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
-    if series:
-        _need(table, series)
-        for key, grp in df.groupby(series):
-            ax.plot(grp[x].astype("str"), pd.to_numeric(grp[y], errors="coerce"), label=str(key))
-        ax.legend(title=series)
-    else:
-        ax.plot(df[x].astype("str"), pd.to_numeric(df[y], errors="coerce"))
-    ax.set_title(title), ax.set_xlabel(x), ax.set_ylabel(y)
-    fig.autofmt_xdate()
-    return _save_fig(fig, path, "line")
 
-
-@operator(library=_LIB)
-async def scatter(table: Table, x: str, y: str, path: str, title: str = "") -> ChartResult:
-    """Scatter plot of numeric ``x`` vs numeric ``y`` to a PNG at ``path``; returns a handle."""
-    plt, pd = _mpl()
-    _require_numeric(table, x, "scatter")
-    _require_numeric(table, y, "scatter")
-    df = _to_df(table)
-    fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
-    ax.scatter(pd.to_numeric(df[x], errors="coerce"), pd.to_numeric(df[y], errors="coerce"), alpha=0.7)
-    ax.set_title(title or f"{y} vs {x}"), ax.set_xlabel(x), ax.set_ylabel(y)
-    return _save_fig(fig, path, "scatter")
-
-
-@operator(library=_LIB)
-async def histogram(table: Table, column: str, path: str, bins: int = 20, title: str = "") -> ChartResult:
-    """Histogram of a numeric ``column`` (``bins`` buckets) to a PNG at ``path``; returns a handle."""
-    plt, pd = _mpl()
-    _require_numeric(table, column, "histogram")
-    vals = pd.to_numeric(_to_df(table)[column], errors="coerce").dropna()
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
-    ax.hist(vals, bins=bins)
-    ax.set_title(title or f"Distribution of {column}"), ax.set_xlabel(column), ax.set_ylabel("count")
-    return _save_fig(fig, path, "histogram")
-
-
-@operator(library=_LIB)
-async def box(table: Table, column: str, path: str, by: str = "", title: str = "") -> ChartResult:
-    """Box plot of numeric ``column`` (optionally one box per ``by`` group) to a PNG; returns a handle."""
-    plt, pd = _mpl()
-    _require_numeric(table, column, "box")
-    df = _to_df(table)
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
-    if by:
-        _need(table, by)
-        groups, labels = [], []
-        for key, grp in df.groupby(by):
-            vals = pd.to_numeric(grp[column], errors="coerce").dropna()
-            if len(vals):
-                groups.append(vals)
-                labels.append(str(key))
-        ax.boxplot(groups, tick_labels=labels)
-        ax.set_xlabel(by)
-    else:
-        ax.boxplot(pd.to_numeric(df[column], errors="coerce").dropna())
-    ax.set_title(title or f"{column} distribution"), ax.set_ylabel(column)
-    return _save_fig(fig, path, "box")
-
-
-@operator(library=_LIB)
-async def pie(
-    table: Table, labels: str, values: str, path: str, title: str = "", max_slices: int = 8
-) -> ChartResult:
-    """Pie chart of numeric ``values`` summed per ``labels`` category; slices past ``max_slices``
-    are grouped into an "other" wedge. Writes a PNG at ``path``; returns a handle.
-    """
-    plt, pd = _mpl()
-    _need(table, labels)
-    _require_numeric(table, values, "pie")
-    df = _to_df(table)
-    ser = (
-        pd.to_numeric(df[values], errors="coerce")
-        .groupby(df[labels].astype("str"))
-        .sum()
-        .sort_values(ascending=False)
-    )
-    if len(ser) > max_slices:
-        ser = pd.concat([ser.iloc[:max_slices], pd.Series({"other": ser.iloc[max_slices:].sum()})])
-    fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
-    ax.pie(ser.to_numpy(), labels=[str(i) for i in ser.index], autopct="%1.1f%%")
-    ax.set_title(title or f"{values} by {labels}")
-    return _save_fig(fig, path, "pie")
-
-
-@operator(library=_LIB)
-async def heatmap(table: Table, path: str, title: str = "") -> ChartResult:
-    """Heatmap of the table's numeric matrix (e.g. a ``correlation`` or ``pivot`` output) to a PNG.
-
-    The numeric columns form the grid; a leading non-numeric column (like ``correlation``'s
-    ``field``) labels the rows. Cells are annotated with their values. Returns a handle.
-    """
-    plt, pd = _mpl()
-    numeric = [c for c in table.columns if _column_is_numeric(table, c)]
-    if not numeric:
-        raise ValueError("heatmap: no numeric columns to plot")
-    label_col = next((c for c in table.columns if c not in numeric), None)
-    df = _to_df(table)
-    mat = df[numeric].apply(pd.to_numeric, errors="coerce").to_numpy()
-    row_labels = df[label_col].astype("str").tolist() if label_col else [str(i) for i in range(len(df))]
-    fig, ax = plt.subplots(figsize=(1 + 0.7 * len(numeric), 1 + 0.5 * len(row_labels)), dpi=100)
-    im = ax.imshow(mat, aspect="auto", cmap="coolwarm")
-    ax.set_xticks(range(len(numeric)))
-    ax.set_xticklabels(numeric, rotation=45, ha="right")
-    ax.set_yticks(range(len(row_labels)))
-    ax.set_yticklabels(row_labels)
-    for i in range(len(row_labels)):
-        for j in range(len(numeric)):
-            if mat[i][j] == mat[i][j]:  # skip NaN
-                ax.text(j, i, f"{mat[i][j]:.2f}", ha="center", va="center", fontsize=8)
-    fig.colorbar(im, ax=ax)
-    ax.set_title(title or "Heatmap")
-    return _save_fig(fig, path, "heatmap")
+    if kind in {"bar", "line", "scatter"}:
+        if not x or not y:
+            raise ValueError(f"chart: kind={kind!r} needs both x and y")
+        if kind == "scatter":
+            _require_numeric(table, x, "chart")
+            _require_numeric(table, y, "chart")
+            fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
+            ax.scatter(pd.to_numeric(df[x], errors="coerce"), pd.to_numeric(df[y], errors="coerce"), alpha=0.7)
+            ax.set_title(title or f"{y} vs {x}"), ax.set_xlabel(x), ax.set_ylabel(y)
+        else:
+            _need(table, x, y)
+            fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
+            if kind == "line" and series:
+                _need(table, series)
+                for key, grp in df.groupby(series):
+                    ax.plot(grp[x].astype("str"), pd.to_numeric(grp[y], errors="coerce"), label=str(key))
+                ax.legend(title=series)
+            elif kind == "line":
+                ax.plot(df[x].astype("str"), pd.to_numeric(df[y], errors="coerce"))
+            else:
+                ax.bar(df[x].astype("str"), pd.to_numeric(df[y], errors="coerce"))
+            ax.set_title(title), ax.set_xlabel(x), ax.set_ylabel(y)
+            fig.autofmt_xdate()
+    elif kind in {"histogram", "box"}:
+        if not column:
+            raise ValueError(f"chart: kind={kind!r} needs a column")
+        _require_numeric(table, column, "chart")
+        fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
+        if kind == "histogram":
+            ax.hist(pd.to_numeric(df[column], errors="coerce").dropna(), bins=bins)
+            ax.set_title(title or f"Distribution of {column}"), ax.set_xlabel(column), ax.set_ylabel("count")
+        elif by:
+            _need(table, by)
+            groups, box_labels = [], []
+            for key, grp in df.groupby(by):
+                vals = pd.to_numeric(grp[column], errors="coerce").dropna()
+                if len(vals):
+                    groups.append(vals)
+                    box_labels.append(str(key))
+            ax.boxplot(groups, tick_labels=box_labels)
+            ax.set_title(title or f"{column} distribution"), ax.set_xlabel(by), ax.set_ylabel(column)
+        else:
+            ax.boxplot(pd.to_numeric(df[column], errors="coerce").dropna())
+            ax.set_title(title or f"{column} distribution"), ax.set_ylabel(column)
+    elif kind == "pie":
+        if not labels or not values:
+            raise ValueError("chart: kind='pie' needs labels and values")
+        _need(table, labels)
+        _require_numeric(table, values, "chart")
+        ser = (
+            pd.to_numeric(df[values], errors="coerce")
+            .groupby(df[labels].astype("str"))
+            .sum()
+            .sort_values(ascending=False)
+        )
+        if len(ser) > max_slices:
+            ser = pd.concat([ser.iloc[:max_slices], pd.Series({"other": ser.iloc[max_slices:].sum()})])
+        fig, ax = plt.subplots(figsize=(6, 6), dpi=100)
+        ax.pie(ser.to_numpy(), labels=[str(i) for i in ser.index], autopct="%1.1f%%")
+        ax.set_title(title or f"{values} by {labels}")
+    else:  # heatmap — plots the numeric matrix; a leading non-numeric column labels the rows
+        numeric = [c for c in table.columns if _column_is_numeric(table, c)]
+        if not numeric:
+            raise ValueError("chart: kind='heatmap' needs numeric columns to plot")
+        label_col = next((c for c in table.columns if c not in numeric), None)
+        mat = df[numeric].apply(pd.to_numeric, errors="coerce").to_numpy()
+        row_labels = df[label_col].astype("str").tolist() if label_col else [str(i) for i in range(len(df))]
+        fig, ax = plt.subplots(figsize=(1 + 0.7 * len(numeric), 1 + 0.5 * len(row_labels)), dpi=100)
+        im = ax.imshow(mat, aspect="auto", cmap="coolwarm")
+        ax.set_xticks(range(len(numeric)))
+        ax.set_xticklabels(numeric, rotation=45, ha="right")
+        ax.set_yticks(range(len(row_labels)))
+        ax.set_yticklabels(row_labels)
+        for i in range(len(row_labels)):
+            for j in range(len(numeric)):
+                if mat[i][j] == mat[i][j]:  # skip NaN
+                    ax.text(j, i, f"{mat[i][j]:.2f}", ha="center", va="center", fontsize=8)
+        fig.colorbar(im, ax=ax)
+        ax.set_title(title or "Heatmap")
+    return _save_fig(fig, path, kind)
 
 
 # --- report --------------------------------------------------------------------------------
 
 
-@operator(library=_LIB)
+@_op()
 async def to_markdown(table: Table, title: str = "Report", max_rows: int = 50) -> Report:
     """Render the table as a markdown report (first ``max_rows`` rows)."""
 
@@ -1726,7 +1737,7 @@ async def to_markdown(table: Table, title: str = "Report", max_rows: int = 50) -
     return Report(markdown="\n".join(lines))
 
 
-@operator(library=_LIB)
+@_op()
 async def answer(table: Table, decimals: int | None = None) -> Report:
     """State a single result. Takes a **1×1 table** (one column, one row) and returns a report whose
     text is exactly that value — rounded to ``decimals`` if given (numeric only). Use as the final

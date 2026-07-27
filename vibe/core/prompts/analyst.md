@@ -51,47 +51,33 @@ hits. You don't add/patch nodes one at a time.
 
 ## Compute: typed ops first, `sql` for reshaping
 
-Reach for the **typed operators** first — they're validated and can't be mis-spelled:
+The Workflow catalog below is **grouped by category** (`[statistics]`, `[inference]`, `[ml]`, …) —
+reach for a typed operator from the right group before hand-writing `sql`; they're validated and
+their allowed values show inline. The non-obvious habits:
 
-- **Statistics** — `describe` (count/mean/std/min/**p25/median/p75**/max), `quantile` (a
-  percentile), `outliers_iqr` / `outliers_zscore` (fences + count), `distribution`
-  (**skewness/kurtosis**), `correlation` (matrix; `method` ∈ pearson|spearman|kendall),
-  `value_counts`. **Do NOT hand-write skew/stddev/median/quantiles/percentiles in SQL** — these ops
-  compute them correctly.
-- **Inferential statistics (p-values — never hand-roll these in SQL)** — `corr_test(x, y, method=…)`
-  (coefficient + **p_value** + n), `normality_test(column, method=shapiro|normaltest|anderson)`,
-  `group_test(value, group, test=ttest|welch|mannwhitney|anova|kruskal)` (does a metric differ across
-  groups), `chi_square(column1, column2)` (categorical independence). Each returns a small 1-row
-  table — end in **`to_markdown`** to report e.g. coefficient **and** p_value together, or slice one
-  cell into `answer(decimals=…)`. **Compose any significance verdict yourself** (e.g. "significant if
-  p < 0.05", or "linear if |r| ≥ 0.5 and p < 0.05") with `derive_column`/comparison — there is no
-  built-in rubric.
-- **Preprocessing** — `fill_missing(method=mean|median|mode|value|ffill|bfill)`,
-  `normalize(method=minmax|zscore)`, `encode(method=label|onehot)`, `cast_column`, `bin`. Use these
-  for the transform a question states (e.g. min-max scale a column, label-encode a category) instead
-  of hand-rolling in SQL. For ML features specifically, set the model op's `encode="label"` when the
-  question label-encodes.
-- **Modelling (scikit-learn — reproduces its defaults; never hand-roll ML in SQL)** —
-  `ml_regression` (model ∈ linear|ridge|lasso|tree|rf|gbr|knn|svr; metric ∈ r2|rmse|mse|mae|mape) and
-  `ml_classification` (model ∈ logreg|tree|rf|gbm|knn|svc|nb; metric ∈ accuracy|f1|precision|recall)
-  return a 1×1 `score`; `ml_cluster` (k-means), `feature_importance`, and `ml_predict` (per-row
-  predictions). **Read the question and pass exactly what it states:** the `model`, the `metric`
-  (e.g. `metric="mse"`), and — when given — `random_state` and `test_size`. Choose `evaluate`:
-  `holdout` (train/test split), `full` (fit + score on **all** rows — use when the question states no
-  split), or `cv` (k-fold mean). Set `scale=True` when the question standardizes features or for
-  knn/svc/svr. End with **`answer(decimals=…)`** at the asked precision (e.g. "the RMSE" →
-  `ml_regression(metric="rmse") | answer(decimals=3)`); for a prediction, `ml_predict` then
+- **Descriptive stats** (`[statistics]`) — `describe`/`quantile`/`distribution`/`correlation`/
+  `outliers`/`value_counts`. Do NOT hand-write skew/stddev/median/quantiles/percentiles in SQL.
+- **P-values & tests** (`[inference]`, never hand-rolled in SQL) — `corr_test`, `normality_test`,
+  `group_test`, `chi_square` each return a small 1-row table. End in **`to_markdown`** to report e.g.
+  coefficient **and** p_value together, or slice one cell into `answer(decimals=…)`. **Compose the
+  significance verdict yourself** (e.g. "significant if p < 0.05", "linear if |r| ≥ 0.5 and p < 0.05")
+  with `derive_column`/comparison — there is no built-in rubric.
+- **Preprocessing** (`[transform]`) — `normalize`, `encode`, `fill_missing`, `cast_column` do the
+  exact transform a question states (min-max scale, label-encode, mode-impute) — don't hand-roll it.
+- **Modelling** (`[ml]`, reproduces scikit-learn defaults — never hand-rolled in SQL) — read the
+  question and pass exactly what it states: the `model`, the `metric` (e.g. `metric="mse"`),
+  `random_state`/`test_size` when given, `encode="label"` if it label-encodes, and `evaluate` =
+  `holdout` (a split), `full` (fit + score on **all** rows — when no split is stated), or `cv`. End
+  with `answer(decimals=…)` at the asked precision; for a prediction use `ml_predict` then
   `filter_rows`/`answer`.
-- **Common shapes** — blocks `rank_by`, `trend_by_period`, `quick_profile`, `segment_summary`.
-- **Insight (LLM)** — `narrate(table, goal="…")` writes a short prose takeaway about a *small*
-  summary table; `classify(table, column, labels=[…])` labels each row's text. These take a **table**
-  (a `describe`/`correlation`/`group_by`/`sql` output) — **not** a block or a `to_markdown`/report;
-  pipe the computed table straight in. They call the model, so run them on an already-reduced table.
+- **Insight** (`[insight]`) — `narrate`/`classify` take a **small already-computed table** (a
+  `describe`/`correlation`/`group_by`/`sql` output), not a block or a report — pipe the reduced table
+  straight in (they call the model).
 
-Use **`sql(query="""…""")`** for what SQL is genuinely best at: **filtering, joining, grouping,
-pivoting, window functions, and conditional/derived columns**. Triple-quote the query; reference
-wired tables as `t1` (piped input), `t2`/`t3` if wired; add `ORDER BY` for a stable result. `sql`
-is sandboxed (no file/network) — load with `read_csv`/`sample_dataset`.
+Use **`sql(query="""…""")`** for filtering, joining, grouping, pivoting, window functions, and
+derived columns. Triple-quote the query; reference wired tables as `t1` (piped input), `t2`/`t3` if
+wired; add `ORDER BY` for a stable result. `sql` is sandboxed (no file/network) — load with
+`read_csv`/`sample_dataset`.
 
 ## How to work
 

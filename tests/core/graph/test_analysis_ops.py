@@ -94,7 +94,7 @@ async def test_quantile_outliers_and_distribution() -> None:
     assert q90.columns == ["quantile"] and len(q90.rows) == 1
     assert isinstance(q90.rows[0]["quantile"], (int, float))
 
-    out = await A.outliers_iqr(t, column="revenue")
+    out = await A.outliers(t, column="revenue")  # method="iqr" default
     r = out.rows[0]
     assert set(out.columns) == {"lower", "upper", "count", "total"}
     assert r["lower"] <= r["upper"] and 0 <= r["count"] <= r["total"] == len(t.rows)
@@ -377,12 +377,12 @@ async def test_sink_ops_write_file_and_return_handle(tmp_path) -> None:
     assert csv_path.exists() and exp.rows == len(t.rows) and "region" in exp.columns
     ranked = await A.group_by(t, keys=["country"], metric="revenue", aggs=["sum"])
     png = tmp_path / "chart.png"
-    chart = await A.bar_chart(ranked, x="country", y="revenue_sum", path=str(png), title="Top")
+    chart = await A.chart(ranked, kind="bar", x="country", y="revenue_sum", path=str(png), title="Top")
     assert png.exists() and png.stat().st_size > 0 and chart.kind == "bar"
     # the value stays a tiny handle, not the image bytes
     assert set(chart.model_dump()) == {"path", "kind"}
     line_png = tmp_path / "line.png"
-    line = await A.line_chart(ranked, x="country", y="revenue_sum", path=str(line_png), title="Trend")
+    line = await A.chart(ranked, kind="line", x="country", y="revenue_sum", path=str(line_png), title="Trend")
     assert line_png.exists() and line.kind == "line"
 
 
@@ -594,11 +594,11 @@ async def test_describe_output_is_sql_selectable() -> None:
 @pytest.mark.parametrize(
     ("kind", "call"),
     [
-        ("scatter", lambda t, p: A.scatter(t, x="units", y="revenue", path=p)),
-        ("histogram", lambda t, p: A.histogram(t, column="revenue", path=p)),
-        ("box", lambda t, p: A.box(t, column="revenue", by="region", path=p)),
-        ("pie", lambda t, p: A.pie(t, labels="region", values="revenue", path=p)),
-        ("line", lambda t, p: A.line_chart(t, x="date", y="revenue", path=p, series="region")),
+        ("scatter", lambda t, p: A.chart(t, kind="scatter", x="units", y="revenue", path=p)),
+        ("histogram", lambda t, p: A.chart(t, kind="histogram", column="revenue", path=p)),
+        ("box", lambda t, p: A.chart(t, kind="box", column="revenue", by="region", path=p)),
+        ("pie", lambda t, p: A.chart(t, kind="pie", labels="region", values="revenue", path=p)),
+        ("line", lambda t, p: A.chart(t, kind="line", x="date", y="revenue", path=p, series="region")),
     ],
 )
 async def test_chart_ops_write_png_and_return_handle(kind, call, tmp_path) -> None:
@@ -612,7 +612,7 @@ async def test_chart_ops_write_png_and_return_handle(kind, call, tmp_path) -> No
 async def test_heatmap_of_correlation(tmp_path) -> None:
     corr = await A.correlation(await _sales(), columns=["units", "revenue", "cost"])
     out = tmp_path / "hm.png"
-    res = await A.heatmap(corr, path=str(out))
+    res = await A.chart(corr, kind="heatmap", path=str(out))
     assert res.kind == "heatmap" and out.exists()
 
 
@@ -620,7 +620,7 @@ async def test_heatmap_of_correlation(tmp_path) -> None:
 async def test_chart_bad_axis_errors(tmp_path) -> None:
     # a non-numeric axis on a numeric-only chart fails with a clear, column-naming error
     with pytest.raises(ValueError, match="not numeric"):
-        await A.scatter(await _sales(), x="region", y="revenue", path=str(tmp_path / "x.png"))
+        await A.chart(await _sales(), kind="scatter", x="region", y="revenue", path=str(tmp_path / "x.png"))
 
 
 @pytest.mark.asyncio
@@ -747,7 +747,7 @@ async def test_encode_label_and_onehot() -> None:
 @pytest.mark.asyncio
 async def test_outliers_zscore_and_fill_mode() -> None:
     t = A.Table(columns=["v"], rows=[{"v": float(i)} for i in range(20)] + [{"v": 1000.0}])
-    oz = await A.outliers_zscore(t, column="v", threshold=3.0)
+    oz = await A.outliers(t, column="v", method="zscore", factor=3.0)
     assert oz.rows[0]["count"] == 1 and oz.rows[0]["total"] == 21
     fm = await A.fill_missing(
         A.Table(columns=["c"], rows=[{"c": "a"}, {"c": "a"}, {"c": None}]), column="c", method="mode"
@@ -769,3 +769,39 @@ async def test_ml_encode_label_runs_and_differs_from_onehot() -> None:
     assert lab.columns == ["score"] and oh.columns == ["score"]
     # label-encoding a multi-value categorical yields a different fit than one-hot
     assert lab.rows[0]["score"] != oh.rows[0]["score"]
+
+
+def test_catalog_is_grouped_by_category() -> None:
+
+    from vibe.core.graph.operators import registered_operators
+    from vibe.core.graph.render import _CATEGORY_ORDER, operators_catalog
+
+    ops = {n: s for n, s in registered_operators().items() if s.library == "analysis"}
+    # every analysis op is tagged with a known category (no stragglers in "other")
+    assert ops and all(s.category in _CATEGORY_ORDER for s in ops.values())
+    cat = operators_catalog(ops, {}, verbose=True)
+    # category headers render in the defined order
+    seen = [c for c in _CATEGORY_ORDER if f"[{c}]" in cat]
+    assert seen == [c for c in _CATEGORY_ORDER if c in {s.category for s in ops.values()}]
+    positions = [cat.index(f"[{c}]") for c in seen]
+    assert positions == sorted(positions)
+    assert "[statistics]" in cat and "[ml]" in cat and "[inference]" in cat
+
+
+def test_untagged_catalog_stays_flat() -> None:
+    # Backward-compatible: a catalog whose ops carry no category renders as a flat sorted list (no
+    # headers) — so untagged libraries are unchanged. Clone analysis specs with category stripped.
+    import dataclasses
+    import re
+
+    from vibe.core.graph.operators import registered_operators
+    from vibe.core.graph.render import operators_catalog
+
+    untagged = {
+        n: dataclasses.replace(s, category=None)
+        for n, s in registered_operators().items()
+        if s.library == "analysis"
+    }
+    op_section = operators_catalog(untagged, {}, verbose=False).split("Available blocks")[0]
+    # no bare "[category]" header lines when nothing is tagged
+    assert not re.search(r"(?m)^\[\w+\]$", op_section)

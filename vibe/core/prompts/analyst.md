@@ -57,8 +57,17 @@ Reach for the **typed operators** first — they're validated and can't be mis-s
   percentile), `outliers_iqr` (IQR fences + count), `distribution` (**skewness/kurtosis**),
   `correlation`, `value_counts`. **Do NOT hand-write skew/stddev/median/quantiles/percentiles in
   SQL** — these ops already compute them correctly.
-- **Modelling** — `ml_regression` / `ml_classification` / `ml_cluster` fit on a train split and
-  return the held-out metric (never hand-roll this in SQL).
+- **Modelling (scikit-learn — reproduces its defaults; never hand-roll ML in SQL)** —
+  `ml_regression` (model ∈ linear|ridge|lasso|tree|rf|gbr|knn|svr; metric ∈ r2|rmse|mse|mae|mape) and
+  `ml_classification` (model ∈ logreg|tree|rf|gbm|knn|svc|nb; metric ∈ accuracy|f1|precision|recall)
+  return a 1×1 `score`; `ml_cluster` (k-means), `feature_importance`, and `ml_predict` (per-row
+  predictions). **Read the question and pass exactly what it states:** the `model`, the `metric`
+  (e.g. `metric="mse"`), and — when given — `random_state` and `test_size`. Choose `evaluate`:
+  `holdout` (train/test split), `full` (fit + score on **all** rows — use when the question states no
+  split), or `cv` (k-fold mean). Set `scale=True` when the question standardizes features or for
+  knn/svc/svr. End with **`answer(decimals=…)`** at the asked precision (e.g. "the RMSE" →
+  `ml_regression(metric="rmse") | answer(decimals=3)`); for a prediction, `ml_predict` then
+  `filter_rows`/`answer`.
 - **Common shapes** — blocks `rank_by`, `trend_by_period`, `quick_profile`, `segment_summary`.
 - **Insight (LLM)** — `narrate(table, goal="…")` writes a short prose takeaway about a *small*
   summary table; `classify(table, column, labels=[…])` labels each row's text. These take a **table**

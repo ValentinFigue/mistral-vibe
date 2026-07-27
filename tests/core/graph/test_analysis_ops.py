@@ -408,26 +408,79 @@ async def test_all_analysis_blocks_run(cache: CacheStore) -> None:
         assert md.startswith("# ")
 
 
-@pytest.mark.timeout(60)  # cold sklearn/scipy import + fits, tolerant of CI/xdist contention
+@pytest.mark.timeout(90)  # cold sklearn/scipy import + fits across the model zoo
 @pytest.mark.asyncio
 async def test_ml_operators_run_and_are_seeded_deterministic() -> None:
-    # Skipped unless the optional [ml] extra is installed (uv run --extra ml). Cheap models keep it
-    # fast; determinism is what matters for cache correctness.
-    pytest.importorskip("sklearn")
+    # scikit-learn is a base dependency, so this always runs. Cheap fits keep it fast; determinism
+    # is what matters for cache correctness.
     t = await _sales()
 
     reg = await A.ml_regression(t, target="revenue", features=["units", "cost"], model="linear", metric="r2")
     assert reg.columns == ["score"] and isinstance(reg.rows[0]["score"], (int, float))
+    # every new regression model + the mse metric author cleanly
+    for model in ("ridge", "lasso", "tree", "rf", "gbr", "knn", "svr"):
+        out = await A.ml_regression(t, target="revenue", features=["units", "cost"], model=model, metric="mse")
+        assert out.columns == ["score"]
 
     clf1 = await A.ml_classification(t, target="region", features=["revenue", "units", "cost"], model="tree")
     clf2 = await A.ml_classification(t, target="region", features=["revenue", "units", "cost"], model="tree")
-    assert clf1.rows[0]["score"] == clf2.rows[0]["score"]  # fixed seed → deterministic
+    assert clf1.rows[0]["score"] == clf2.rows[0]["score"]  # fixed random_state → deterministic
+    for model in ("logreg", "rf", "gbm", "knn", "svc", "nb"):
+        out = await A.ml_classification(t, target="region", features=["revenue", "units"], model=model, scale=True)
+        assert out.columns == ["score"]
 
     clus = await A.ml_cluster(t, features=["revenue", "units"], k=2)
     assert clus.columns == ["score"] and -1.0 <= clus.rows[0]["score"] <= 1.0  # silhouette range
 
     with pytest.raises(ValueError, match="model must be one of"):
         await A.ml_regression(t, target="revenue", features=["units"], model="nope")
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.asyncio
+async def test_ml_regression_matches_sklearn_reference() -> None:
+    # The DABench guarantee: our op reproduces a direct scikit-learn computation for the same setup.
+    import pandas as pd
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import mean_squared_error
+    from sklearn.model_selection import train_test_split
+
+    t = await _sales()
+    df = A._to_df(t)[["units", "cost", "revenue"]].dropna()
+    x = pd.get_dummies(df[["units", "cost"]])
+    y = pd.to_numeric(df["revenue"], errors="coerce")
+
+    # evaluate="full": fit + score on all rows, MSE
+    expected_full = mean_squared_error(y, LinearRegression().fit(x, y).predict(x))
+    got_full = await A.ml_regression(
+        t, target="revenue", features=["units", "cost"], model="linear", metric="mse", evaluate="full"
+    )
+    assert got_full.rows[0]["score"] == pytest.approx(expected_full, rel=1e-9)
+
+    # evaluate="holdout" with the exact split the op uses (random_state=42, test_size=0.2), RMSE
+    x_tr, x_te, y_tr, y_te = train_test_split(x, y, test_size=0.2, random_state=42)
+    expected_ho = mean_squared_error(y_te, LinearRegression().fit(x_tr, y_tr).predict(x_te)) ** 0.5
+    got_ho = await A.ml_regression(
+        t, target="revenue", features=["units", "cost"], model="linear", metric="rmse",
+        evaluate="holdout", test_size=0.2, random_state=42,
+    )
+    assert got_ho.rows[0]["score"] == pytest.approx(expected_ho, rel=1e-9)
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.asyncio
+async def test_ml_predict_returns_aligned_predictions() -> None:
+    t = await _sales()
+    complete = len(A._to_df(t)[["units", "cost", "revenue"]].dropna())
+    out = await A.ml_predict(
+        t, target="revenue", features=["units", "cost"], model="linear", task="regression",
+        evaluate="full", on="all",
+    )
+    assert out.columns == ["units", "cost", "revenue", "revenue_pred"]
+    assert len(out.rows) == complete
+    assert all(isinstance(r["revenue_pred"], float) for r in out.rows)
+    with pytest.raises(ValueError, match="not valid for task"):
+        await A.ml_predict(t, target="revenue", features=["units"], model="logreg", task="regression")
 
 
 def test_enum_defaults_are_within_allowed() -> None:
@@ -573,7 +626,6 @@ async def test_chart_bad_axis_errors(tmp_path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.timeout(60)
 async def test_feature_importance_ranks_and_aggregates() -> None:
-    pytest.importorskip("sklearn")
     t = await _sales()
     fi = await A.feature_importance(
         t, target="region", features=["revenue", "units", "cost", "product"], model="rf"

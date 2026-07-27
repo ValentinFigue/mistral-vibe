@@ -1207,6 +1207,7 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "rpds-py" },
+    { name = "scikit-learn" },
     { name = "secretstorage", marker = "sys_platform == 'linux'" },
     { name = "six" },
     { name = "smmap" },
@@ -1229,11 +1230,6 @@ dependencies = [
     { name = "websockets" },
     { name = "zipp" },
     { name = "zstandard" },
-]
-
-[package.optional-dependencies]
-ml = [
-    { name = "scikit-learn" },
 ]
 
 [package.dev-dependencies]
@@ -1345,7 +1341,7 @@ requires-dist = [
     { name = "requests", specifier = "==2.33.1" },
     { name = "rich", specifier = "==15.0.0" },
     { name = "rpds-py", specifier = "==0.30.0" },
-    { name = "scikit-learn", marker = "extra == 'ml'", specifier = "==1.9.0" },
+    { name = "scikit-learn", specifier = "==1.9.0" },
     { name = "secretstorage", marker = "sys_platform == 'linux'", specifier = "==3.5.0" },
     { name = "six", specifier = "==1.17.0" },
     { name = "smmap", specifier = "==5.0.3" },
@@ -1369,7 +1365,6 @@ requires-dist = [
     { name = "zipp", specifier = "==3.23.1" },
     { name = "zstandard", specifier = "==0.25.0" },
 ]
-provides-extras = ["ml"]
 
 [package.metadata.requires-dev]
 build = [

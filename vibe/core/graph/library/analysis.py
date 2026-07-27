@@ -753,20 +753,23 @@ async def distribution(table: Table, column: str) -> Table:
     return _from_df(pd.DataFrame([row]).round(4))
 
 
-# --- machine learning (scikit-learn — optional `[ml]` extra) --------------------------------
-# sklearn is NOT a base dependency; these ops import it lazily and raise an actionable error when
-# it is absent. Results are deterministic for a fixed ``seed`` but depend on the scikit-learn
-# version, which the recipe fingerprint does NOT capture — bump CACHE_VERSION when upgrading it.
+# --- machine learning (scikit-learn) -------------------------------------------------------
+# scikit-learn is a base dependency; these ops still import it lazily *inside* the op bodies so
+# importing this module for catalog rendering (every CLI startup) stays sklearn-free. Results are
+# deterministic for a fixed ``random_state`` but depend on the scikit-learn version, which the recipe
+# fingerprint does NOT capture — bump CACHE_VERSION when upgrading sklearn or changing ML semantics.
+# The ops reproduce scikit-learn's defaults so the numbers match a default-based reference solution.
+
+_ML_RANDOM_STATE = 42  # default seed; a concrete int (never None) so ML ops stay pure & cacheable
+_CV_FOLDS = 5
 
 
 def _require_sklearn() -> None:
+    """Defensive guard — sklearn is a base dependency, so this should never trigger."""
     try:
         import sklearn  # noqa: F401
-    except ImportError as exc:  # only hit when the [ml] extra isn't installed
-        raise ValueError(
-            "ML operators need scikit-learn — install the optional extra: "
-            "`uv sync --extra ml` (or `pip install 'mistral-vibe[ml]'`)."
-        ) from exc
+    except ImportError as exc:  # pragma: no cover - sklearn is a base dependency
+        raise ValueError("ML operators need scikit-learn, which is a base dependency of vibe.") from exc
 
 
 def _ml_xy(table: Table, target: str, features: list[str]) -> tuple[Any, Any]:
@@ -784,9 +787,130 @@ def _ml_xy(table: Table, target: str, features: list[str]) -> tuple[Any, Any]:
 
 
 def _score_table(value: float) -> Table:
+    """A 1×1 ``score`` table — kept at full precision; ``answer(decimals=…)`` does the rounding."""
     import pandas as pd
 
-    return _from_df(pd.DataFrame([{"score": round(float(value), 4)}]))
+    return _from_df(pd.DataFrame([{"score": float(value)}]))
+
+
+# scikit-learn estimators keyed by short name. Each entry is a thunk (built only when selected), and
+# ``random_state`` is passed only to estimators whose constructor accepts it (LinearRegression, KNN,
+# GaussianNB do not) — passing it blindly raises TypeError.
+def _reg_models(random_state: int) -> dict[str, Any]:
+    from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+    from sklearn.linear_model import Lasso, LinearRegression, Ridge
+    from sklearn.neighbors import KNeighborsRegressor
+    from sklearn.svm import SVR
+    from sklearn.tree import DecisionTreeRegressor
+
+    return {
+        "linear": lambda: LinearRegression(),
+        "ridge": lambda: Ridge(random_state=random_state),
+        "lasso": lambda: Lasso(random_state=random_state),
+        "tree": lambda: DecisionTreeRegressor(random_state=random_state),
+        "rf": lambda: RandomForestRegressor(random_state=random_state),
+        "gbr": lambda: GradientBoostingRegressor(random_state=random_state),
+        "knn": lambda: KNeighborsRegressor(),
+        "svr": lambda: SVR(),
+    }
+
+
+def _clf_models(random_state: int) -> dict[str, Any]:
+    from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.naive_bayes import GaussianNB
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.svm import SVC
+    from sklearn.tree import DecisionTreeClassifier
+
+    return {
+        "logreg": lambda: LogisticRegression(max_iter=1000, random_state=random_state),
+        "tree": lambda: DecisionTreeClassifier(random_state=random_state),
+        "rf": lambda: RandomForestClassifier(random_state=random_state),
+        "gbm": lambda: GradientBoostingClassifier(random_state=random_state),
+        "knn": lambda: KNeighborsClassifier(),
+        "svc": lambda: SVC(random_state=random_state),
+        "nb": lambda: GaussianNB(),
+    }
+
+
+def _reg_scorer(metric: str):  # noqa: ANN202 (callable (y_true, y_pred) -> float)
+    from sklearn.metrics import (
+        mean_absolute_error,
+        mean_absolute_percentage_error,
+        mean_squared_error,
+        r2_score,
+    )
+
+    return {
+        "r2": r2_score,
+        "mse": mean_squared_error,
+        "rmse": lambda yt, yp: mean_squared_error(yt, yp) ** 0.5,
+        "mae": mean_absolute_error,
+        "mape": mean_absolute_percentage_error,
+    }[metric]
+
+
+def _clf_scorer(metric: str):  # noqa: ANN202 (callable (y_true, y_pred) -> float)
+    from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
+    if metric == "accuracy":
+        return accuracy_score
+    fn = {"f1": f1_score, "precision": precision_score, "recall": recall_score}[metric]
+    return lambda yt, yp: fn(yt, yp, average="weighted", zero_division=0)
+
+
+# cross_val_score needs a scoring *string* and returns errors negated (neg_*), so we map + un-negate.
+_REG_CV_SCORING = {
+    "r2": "r2", "mse": "neg_mean_squared_error", "rmse": "neg_root_mean_squared_error",
+    "mae": "neg_mean_absolute_error", "mape": "neg_mean_absolute_percentage_error",
+}
+_CLF_CV_SCORING = {
+    "accuracy": "accuracy", "f1": "f1_weighted",
+    "precision": "precision_weighted", "recall": "recall_weighted",
+}
+
+
+def _evaluate_estimator(
+    make_est: Any, x: Any, y: Any, *, evaluate: str, scorer: Any, cv_scoring: str,
+    test_size: float, random_state: int, scale: bool, cv_folds: int,
+) -> float:
+    """Fit/score ``make_est()`` under one of three regimes: ``holdout`` (train/test split, score on
+    test), ``full`` (fit on all rows, score on the same — the "no split stated" / training-metric
+    case), or ``cv`` (k-fold cross_val_score mean). Optional StandardScaler is fit on the train fold
+    only (via a Pipeline under cv) so scaling never leaks.
+    """
+    import pandas as pd
+    from sklearn.model_selection import cross_val_score, train_test_split
+
+    if evaluate == "cv":
+        est = make_est()
+        if scale:
+            from sklearn.pipeline import make_pipeline
+            from sklearn.preprocessing import StandardScaler
+
+            est = make_pipeline(StandardScaler(), est)
+        folds = max(2, min(cv_folds, len(y)))
+        scores = cross_val_score(est, x, y, cv=folds, scoring=cv_scoring)
+        val = float(scores.mean())
+        return -val if cv_scoring.startswith("neg_") else val
+
+    if evaluate == "full":
+        x_tr, x_te, y_tr, y_te = x, x, y, y
+    elif evaluate == "holdout":
+        x_tr, x_te, y_tr, y_te = train_test_split(x, y, test_size=test_size, random_state=random_state)
+    else:
+        raise ValueError(f"ml: evaluate must be holdout/full/cv, got {evaluate!r}")
+
+    if scale:
+        from sklearn.preprocessing import StandardScaler
+
+        sc = StandardScaler().fit(x_tr)
+        x_tr = pd.DataFrame(sc.transform(x_tr), index=x_tr.index, columns=x_tr.columns)
+        x_te = pd.DataFrame(sc.transform(x_te), index=x_te.index, columns=x_te.columns)
+    est = make_est()
+    est.fit(x_tr, y_tr)
+    return float(scorer(y_te, est.predict(x_te)))
 
 
 @operator(library=_LIB)
@@ -794,44 +918,35 @@ async def ml_regression(
     table: Table,
     target: str,
     features: list[str],
-    model: Literal["linear", "ridge", "tree", "rf"] = "linear",
-    metric: Literal["r2", "rmse", "mae"] = "r2",
+    model: Literal["linear", "ridge", "lasso", "tree", "rf", "gbr", "knn", "svr"] = "linear",
+    metric: Literal["r2", "rmse", "mse", "mae", "mape"] = "r2",
+    evaluate: Literal["holdout", "full", "cv"] = "holdout",
     test_size: float = 0.2,
-    seed: int = 0,
+    random_state: int = _ML_RANDOM_STATE,
+    scale: bool = False,
+    cv_folds: int = _CV_FOLDS,
 ) -> Table:
-    """Fit a regression model on a train split, score it on the held-out test split — a 1×1 table
-    (``score``). model ∈ linear, ridge, tree, rf; metric ∈ r2, rmse, mae. Categorical features are
-    one-hot encoded and rows with missing values dropped. Deterministic for a given ``seed``.
+    """Fit a regression model and return a 1×1 ``score`` table (reproduces scikit-learn defaults).
+    ``evaluate``: ``holdout`` (train/test split, score on test), ``full`` (fit on all rows, score on
+    the same — use when a question states no split), ``cv`` (k-fold mean). Set ``random_state`` /
+    ``test_size`` to match the question; ``scale`` standardizes features (fit on train) for knn/svr.
+    model ∈ linear|ridge|lasso|tree|rf|gbr|knn|svr; metric ∈ r2|rmse|mse|mae|mape. End with
+    ``answer(decimals=…)`` at the asked precision. Categorical features one-hot encoded, missing rows
+    dropped. Deterministic for a given ``random_state``.
     """
     _require_sklearn()
     import pandas as pd
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.linear_model import LinearRegression, Ridge
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-    from sklearn.model_selection import train_test_split
-    from sklearn.tree import DecisionTreeRegressor
 
-    models = {
-        "linear": lambda: LinearRegression(),
-        "ridge": lambda: Ridge(random_state=seed),
-        "tree": lambda: DecisionTreeRegressor(random_state=seed),
-        "rf": lambda: RandomForestRegressor(random_state=seed),
-    }
+    models = _reg_models(random_state)
     if model not in models:
         raise ValueError(f"ml_regression: model must be one of {sorted(models)}, got {model!r}")
-    if metric not in {"r2", "rmse", "mae"}:
-        raise ValueError(f"ml_regression: metric must be r2/rmse/mae, got {metric!r}")
     x, y = _ml_xy(table, target, features)
     y = pd.to_numeric(y, errors="coerce")
-    x_tr, x_te, y_tr, y_te = train_test_split(x, y, test_size=test_size, random_state=seed)
-    est = models[model]()
-    est.fit(x_tr, y_tr)
-    pred = est.predict(x_te)
-    score = {
-        "r2": lambda: r2_score(y_te, pred),
-        "rmse": lambda: mean_squared_error(y_te, pred) ** 0.5,
-        "mae": lambda: mean_absolute_error(y_te, pred),
-    }[metric]()
+    score = _evaluate_estimator(
+        models[model], x, y, evaluate=evaluate, scorer=_reg_scorer(metric),
+        cv_scoring=_REG_CV_SCORING[metric], test_size=test_size, random_state=random_state,
+        scale=scale, cv_folds=cv_folds,
+    )
     return _score_table(score)
 
 
@@ -840,40 +955,32 @@ async def ml_classification(
     table: Table,
     target: str,
     features: list[str],
-    model: Literal["logreg", "tree", "rf"] = "logreg",
-    metric: Literal["accuracy", "f1"] = "accuracy",
+    model: Literal["logreg", "tree", "rf", "gbm", "knn", "svc", "nb"] = "logreg",
+    metric: Literal["accuracy", "f1", "precision", "recall"] = "accuracy",
+    evaluate: Literal["holdout", "full", "cv"] = "holdout",
     test_size: float = 0.2,
-    seed: int = 0,
+    random_state: int = _ML_RANDOM_STATE,
+    scale: bool = False,
+    cv_folds: int = _CV_FOLDS,
 ) -> Table:
-    """Fit a classifier on a train split, score it on the held-out test split — a 1×1 table
-    (``score``). model ∈ logreg, tree, rf; metric ∈ accuracy, f1 (weighted). Categorical features
-    are one-hot encoded and rows with missing values dropped. Deterministic for a given ``seed``.
+    """Fit a classifier and return a 1×1 ``score`` table (reproduces scikit-learn defaults).
+    ``evaluate``: ``holdout`` (train/test split, score on test), ``full`` (fit + score on all rows),
+    ``cv`` (k-fold mean). Set ``random_state`` / ``test_size`` to match the question; ``scale``
+    standardizes features (fit on train) for knn/svc. model ∈ logreg|tree|rf|gbm|knn|svc|nb;
+    metric ∈ accuracy|f1|precision|recall (f1/precision/recall are weighted). End with
+    ``answer(decimals=…)``. Categorical features one-hot encoded, missing rows dropped. Deterministic
+    for a given ``random_state``.
     """
     _require_sklearn()
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, f1_score
-    from sklearn.model_selection import train_test_split
-    from sklearn.tree import DecisionTreeClassifier
 
-    models = {
-        "logreg": lambda: LogisticRegression(max_iter=1000, random_state=seed),
-        "tree": lambda: DecisionTreeClassifier(random_state=seed),
-        "rf": lambda: RandomForestClassifier(random_state=seed),
-    }
+    models = _clf_models(random_state)
     if model not in models:
         raise ValueError(f"ml_classification: model must be one of {sorted(models)}, got {model!r}")
-    if metric not in {"accuracy", "f1"}:
-        raise ValueError(f"ml_classification: metric must be accuracy/f1, got {metric!r}")
     x, y = _ml_xy(table, target, features)
-    x_tr, x_te, y_tr, y_te = train_test_split(x, y, test_size=test_size, random_state=seed)
-    est = models[model]()
-    est.fit(x_tr, y_tr)
-    pred = est.predict(x_te)
-    score = (
-        accuracy_score(y_te, pred)
-        if metric == "accuracy"
-        else f1_score(y_te, pred, average="weighted")
+    score = _evaluate_estimator(
+        models[model], x, y, evaluate=evaluate, scorer=_clf_scorer(metric),
+        cv_scoring=_CLF_CV_SCORING[metric], test_size=test_size, random_state=random_state,
+        scale=scale, cv_folds=cv_folds,
     )
     return _score_table(score)
 
@@ -884,11 +991,11 @@ async def ml_cluster(
     features: list[str],
     k: int,
     metric: Literal["silhouette", "inertia"] = "silhouette",
-    seed: int = 0,
+    random_state: int = _ML_RANDOM_STATE,
 ) -> Table:
     """K-means over ``features`` (categoricals one-hot encoded, missing rows dropped) — a 1×1 table
     (``score``): ``silhouette`` (cohesion/separation, higher is better) or ``inertia``.
-    Deterministic for a given ``seed``.
+    Deterministic for a given ``random_state``.
     """
     _require_sklearn()
     import pandas as pd
@@ -902,28 +1009,28 @@ async def ml_cluster(
     x = pd.get_dummies(_to_df(table)[feats].dropna())
     if len(x) <= k:
         raise ValueError(f"ml_cluster: need more rows ({len(x)}) than clusters (k={k})")
-    km = KMeans(n_clusters=k, random_state=seed, n_init=10).fit(x)
+    km = KMeans(n_clusters=k, random_state=random_state, n_init=10).fit(x)
     score = silhouette_score(x, km.labels_) if metric == "silhouette" else km.inertia_
     return _score_table(score)
 
 
-def _fi_estimator(model: str, task: str, seed: int):  # noqa: ANN202 (sklearn estimator, lazy)
+def _fi_estimator(model: str, task: str, random_state: int):  # noqa: ANN202 (sklearn estimator, lazy)
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
     from sklearn.linear_model import LinearRegression, LogisticRegression
     from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
     clf = task == "classification"
     if model == "rf":
-        return (RandomForestClassifier if clf else RandomForestRegressor)(random_state=seed)
+        return (RandomForestClassifier if clf else RandomForestRegressor)(random_state=random_state)
     if model == "tree":
-        return (DecisionTreeClassifier if clf else DecisionTreeRegressor)(random_state=seed)
+        return (DecisionTreeClassifier if clf else DecisionTreeRegressor)(random_state=random_state)
     if model == "linear":
         if clf:
             raise ValueError("feature_importance: model 'linear' needs a regression target (use logreg/rf/tree)")
         return LinearRegression()
     if not clf:
         raise ValueError("feature_importance: model 'logreg' needs a classification target (use linear/rf/tree)")
-    return LogisticRegression(max_iter=1000, random_state=seed)
+    return LogisticRegression(max_iter=1000, random_state=random_state)
 
 
 @operator(library=_LIB)
@@ -933,12 +1040,12 @@ async def feature_importance(
     features: list[str],
     model: Literal["rf", "tree", "linear", "logreg"] = "rf",
     task: Literal["auto", "classification", "regression"] = "auto",
-    seed: int = 0,
+    random_state: int = _ML_RANDOM_STATE,
 ) -> Table:
     """Rank ``features`` by how much they predict ``target`` — a table of ``field, importance``
     (descending). rf/tree use impurity importances, linear/logreg use ``|coef|``. ``task=auto``
     infers regression for a numeric target, else classification. One-hot columns are summed back to
-    their source feature, so the ranking is by the columns you named. Needs the ``[ml]`` extra.
+    their source feature, so the ranking is by the columns you named. Deterministic for ``random_state``.
     """
     _require_sklearn()
     import numpy as np
@@ -948,7 +1055,7 @@ async def feature_importance(
     resolved = task if task != "auto" else ("regression" if _column_is_numeric(table, target) else "classification")
     x, y = _ml_xy(table, target, feats)
     y_fit = pd.to_numeric(y, errors="coerce") if resolved == "regression" else y.astype("str")
-    est = _fi_estimator(model, resolved, seed)
+    est = _fi_estimator(model, resolved, random_state)
     est.fit(x, y_fit)
     if hasattr(est, "feature_importances_"):
         imp = np.abs(np.asarray(est.feature_importances_))
@@ -967,6 +1074,76 @@ async def feature_importance(
         reverse=True,
     )
     return _table(["field", "importance"], rows)
+
+
+@operator(library=_LIB)
+async def ml_predict(  # noqa: PLR0914 (fit/split/scale/predict/assemble is inherently several locals)
+    table: Table,
+    target: str,
+    features: list[str],
+    model: Literal[
+        "linear", "ridge", "lasso", "tree", "rf", "gbr", "knn", "svr",
+        "logreg", "gbm", "svc", "nb",
+    ] = "linear",
+    task: Literal["regression", "classification"] = "regression",
+    evaluate: Literal["holdout", "full"] = "holdout",
+    on: Literal["test", "all"] = "test",
+    test_size: float = 0.2,
+    random_state: int = _ML_RANDOM_STATE,
+    scale: bool = False,
+) -> Table:
+    """Fit a model and return **per-row predictions** — a table of ``[*features, target, {target}_pred]``.
+    ``evaluate`` fits on the train split (``holdout``) or all rows (``full``); ``on`` predicts the held-out
+    ``test`` rows or ``all`` rows. Use for "predict …" questions, then ``filter_rows``/``answer`` to read a
+    value. model must match ``task`` (regression: linear|ridge|lasso|tree|rf|gbr|knn|svr; classification:
+    logreg|tree|rf|gbm|knn|svc|nb). Categorical features one-hot encoded, missing rows dropped.
+    """
+    _require_sklearn()
+    import pandas as pd
+    from sklearn.model_selection import train_test_split
+
+    feats = _cols(features)
+    if not feats:
+        raise ValueError("ml_predict: `features` must list at least one column")
+    _need(table, target, *feats)
+    models = _reg_models(random_state) if task == "regression" else _clf_models(random_state)
+    if model not in models:
+        raise ValueError(
+            f"ml_predict: model {model!r} is not valid for task={task!r}; choose one of {sorted(models)}"
+        )
+    df = _to_df(table)[[*feats, target]].dropna()
+    if len(df) <= 1:
+        raise ValueError("ml_predict: need at least 2 complete rows after dropping missing values")
+    x = pd.get_dummies(df[feats])
+    y = pd.to_numeric(df[target], errors="coerce") if task == "regression" else df[target]
+
+    if evaluate == "full":
+        x_fit, y_fit, pred_idx = x, y, x.index
+    else:
+        x_tr, x_te, y_tr, _ = train_test_split(x, y, test_size=test_size, random_state=random_state)
+        x_fit, y_fit = x_tr, y_tr
+        pred_idx = x.index if on == "all" else x_te.index
+
+    x_model = x
+    if scale:
+        from sklearn.preprocessing import StandardScaler
+
+        sc = StandardScaler().fit(x_fit)
+        x_fit = pd.DataFrame(sc.transform(x_fit), index=x_fit.index, columns=x_fit.columns)
+        x_model = pd.DataFrame(sc.transform(x), index=x.index, columns=x.columns)
+
+    est = models[model]()
+    est.fit(x_fit, y_fit)
+    preds = est.predict(x_model.loc[pred_idx])
+
+    pred_col = f"{target}_pred"
+    rows: list[dict[str, Any]] = []
+    for pos, idx in enumerate(pred_idx):
+        src = df.loc[idx]
+        p = preds[pos]
+        pred_val = float(p) if task == "regression" else (p.item() if hasattr(p, "item") else p)
+        rows.append({**{f: src[f] for f in feats}, target: src[target], pred_col: pred_val})
+    return _table([*feats, target, pred_col], rows)
 
 
 # --- insight (LLM-backed) ------------------------------------------------------------------

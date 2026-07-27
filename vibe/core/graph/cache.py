@@ -36,7 +36,7 @@ from vibe.core.logger import logger
 # (the recipe fingerprint does not capture operator code version). Baked into the shared filename.
 # v2: `describe` output gained median/p25/p75 columns.
 # v3: `describe`/`correlation` label column renamed `column` → `field` (reserved-word fix).
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 # Soft byte budget for the shared store. Enforced once per authoring run (not per put), so old
 # results are trimmed as new analyses accumulate across sessions. A cap, not a hard limit.

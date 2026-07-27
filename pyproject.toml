@@ -104,6 +104,7 @@ dependencies = [
     "requests==2.33.1",
     "rich==15.0.0",
     "rpds-py==0.30.0",
+    "scikit-learn==1.9.0",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
     "six==1.17.0",
     "smmap==5.0.3",
@@ -126,13 +127,6 @@ dependencies = [
     "websockets==16.0",
     "zipp==3.23.1",
     "zstandard==0.25.0",
-]
-
-[project.optional-dependencies]
-# Optional ML operators for the analyst (ml_regression / ml_classification / ml_cluster).
-# Kept out of the base install to stay lean; enable with `uv sync --extra ml` (or `pip install vibe[ml]`).
-ml = [
-    "scikit-learn==1.9.0",
 ]
 
 [project.urls]

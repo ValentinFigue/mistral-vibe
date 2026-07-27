@@ -640,3 +640,132 @@ async def test_feature_importance_ranks_and_aggregates() -> None:
     assert {r["field"] for r in reg.rows} == {"units", "cost"}
     with pytest.raises(ValueError, match="regression target"):
         await A.feature_importance(t, target="region", features=["revenue"], model="linear")
+
+
+# --- inferential statistics: scipy reference-parity ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_corr_test_matches_scipy() -> None:
+    from scipy import stats
+
+    xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    ys = [2.1, 3.9, 6.2, 7.8, 10.1, 12.2, 13.7]
+    t = A.Table(columns=["x", "y"], rows=[{"x": x, "y": y} for x, y in zip(xs, ys, strict=True)])
+    out = await A.corr_test(t, x="x", y="y", method="pearson")
+    r_exp, p_exp = stats.pearsonr(xs, ys)
+    assert out.rows[0]["coefficient"] == pytest.approx(float(r_exp), rel=1e-9)
+    # p_value: abs tolerance — the JSON wire format caps ~10 decimal places, so tiny p-values lose
+    # relative precision (harmless: the benchmark rounds p to 4 decimals and significance is p<α).
+    assert out.rows[0]["p_value"] == pytest.approx(float(p_exp), abs=1e-9)
+    assert out.rows[0]["n"] == len(xs)
+    # spearman path also matches
+    sp = await A.corr_test(t, x="x", y="y", method="spearman")
+    assert sp.rows[0]["coefficient"] == pytest.approx(float(stats.spearmanr(xs, ys)[0]), rel=1e-9)
+    with pytest.raises(ValueError, match="≥3 complete"):
+        await A.corr_test(A.Table(columns=["x", "y"], rows=[{"x": 1, "y": 2}]), x="x", y="y")
+
+
+@pytest.mark.asyncio
+async def test_group_test_matches_scipy() -> None:
+    from scipy import stats
+
+    a = [10.0, 12.0, 11.0, 13.0, 9.0]
+    b = [20.0, 22.0, 19.0, 21.0, 23.0]
+    rows = [{"v": v, "g": "a"} for v in a] + [{"v": v, "g": "b"} for v in b]
+    t = A.Table(columns=["v", "g"], rows=rows)
+    tt = await A.group_test(t, value="v", group="g", test="ttest")
+    exp = stats.ttest_ind(a, b, equal_var=True)
+    assert tt.rows[0]["statistic"] == pytest.approx(float(exp[0]), rel=1e-9)
+    assert tt.rows[0]["p_value"] == pytest.approx(float(exp[1]), abs=1e-9)  # abs: see corr_test note
+    assert tt.rows[0]["n_groups"] == 2
+    welch = await A.group_test(t, value="v", group="g", test="welch")
+    assert welch.rows[0]["p_value"] == pytest.approx(float(stats.ttest_ind(a, b, equal_var=False)[1]), abs=1e-9)
+    mw = await A.group_test(t, value="v", group="g", test="mannwhitney")
+    assert mw.rows[0]["p_value"] == pytest.approx(float(stats.mannwhitneyu(a, b)[1]), abs=1e-9)
+    # a three-group frame: anova works, ttest errors on arity
+    t3 = A.Table(columns=["v", "g"], rows=rows + [{"v": v, "g": "c"} for v in [30.0, 31.0, 29.0]])
+    an = await A.group_test(t3, value="v", group="g", test="anova")
+    assert an.rows[0]["n_groups"] == 3
+    with pytest.raises(ValueError, match="exactly 2 groups"):
+        await A.group_test(t3, value="v", group="g", test="ttest")
+
+
+@pytest.mark.asyncio
+async def test_normality_and_chi_square_match_scipy() -> None:
+    from scipy import stats
+
+    vals = [2.1, 3.4, 1.9, 5.6, 4.2, 3.3, 2.8, 4.9, 3.1, 2.2, 5.0, 3.7]
+    t = A.Table(columns=["v"], rows=[{"v": v} for v in vals])
+    sh = await A.normality_test(t, column="v", method="shapiro")
+    assert sh.rows[0]["p_value"] == pytest.approx(float(stats.shapiro(vals)[1]), rel=1e-9)
+    assert sh.rows[0]["critical_value"] is None
+    an = await A.normality_test(t, column="v", method="anderson")
+    assert an.rows[0]["critical_value"] is not None and an.rows[0]["p_value"] is None
+    with pytest.raises(ValueError, match="shapiro needs"):
+        await A.normality_test(A.Table(columns=["v"], rows=[{"v": 1.0}, {"v": 2.0}]), column="v")
+
+    ct = A.Table(
+        columns=["sex", "survived"],
+        rows=[{"sex": s, "survived": v} for s, v in
+              [("m", "no")] * 8 + [("m", "yes")] * 2 + [("f", "no")] * 3 + [("f", "yes")] * 7],
+    )
+    import pandas as pd
+
+    chi = await A.chi_square(ct, column1="sex", column2="survived")
+    exp = stats.chi2_contingency(pd.crosstab([r["sex"] for r in ct.rows], [r["survived"] for r in ct.rows]))
+    assert chi.rows[0]["statistic"] == pytest.approx(float(exp[0]), rel=1e-9)
+    assert chi.rows[0]["dof"] == int(exp[2])
+
+
+# --- preprocessing transforms --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_normalize_minmax_and_zscore() -> None:
+    t = A.Table(columns=["v"], rows=[{"v": 0.0}, {"v": 5.0}, {"v": 10.0}])
+    mm = await A.normalize(t, column="v", method="minmax")
+    assert [r["v"] for r in mm.rows] == pytest.approx([0.0, 0.5, 1.0])
+    zs = await A.normalize(t, column="v", method="zscore", name="z")
+    zcol = [r["z"] for r in zs.rows]
+    assert sum(zcol) == pytest.approx(0.0, abs=1e-9) and "z" in zs.columns
+    # constant column → all zeros (no divide-by-zero)
+    const = await A.normalize(A.Table(columns=["v"], rows=[{"v": 3.0}, {"v": 3.0}]), column="v")
+    assert [r["v"] for r in const.rows] == [0.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_encode_label_and_onehot() -> None:
+    t = A.Table(columns=["g"], rows=[{"g": "b"}, {"g": "a"}, {"g": "a"}, {"g": "c"}])
+    lab = await A.encode(t, column="g", method="label")
+    assert [r["g"] for r in lab.rows] == [1, 0, 0, 2]  # sorted: a=0, b=1, c=2
+    oh = await A.encode(t, column="g", method="onehot")
+    assert {"g_a", "g_b", "g_c"} <= set(oh.columns) and "g" not in oh.columns
+    assert all(r["g_a"] in (0, 1) for r in oh.rows)  # ints, not booleans
+
+
+@pytest.mark.asyncio
+async def test_outliers_zscore_and_fill_mode() -> None:
+    t = A.Table(columns=["v"], rows=[{"v": float(i)} for i in range(20)] + [{"v": 1000.0}])
+    oz = await A.outliers_zscore(t, column="v", threshold=3.0)
+    assert oz.rows[0]["count"] == 1 and oz.rows[0]["total"] == 21
+    fm = await A.fill_missing(
+        A.Table(columns=["c"], rows=[{"c": "a"}, {"c": "a"}, {"c": None}]), column="c", method="mode"
+    )
+    assert [r["c"] for r in fm.rows] == ["a", "a", "a"]
+
+
+@pytest.mark.asyncio
+async def test_ml_encode_label_runs_and_differs_from_onehot() -> None:
+    t = await _sales()
+    lab = await A.ml_regression(
+        t, target="revenue", features=["units", "region"], model="linear", metric="mse",
+        evaluate="full", encode="label",
+    )
+    oh = await A.ml_regression(
+        t, target="revenue", features=["units", "region"], model="linear", metric="mse",
+        evaluate="full", encode="onehot",
+    )
+    assert lab.columns == ["score"] and oh.columns == ["score"]
+    # label-encoding a multi-value categorical yields a different fit than one-hot
+    assert lab.rows[0]["score"] != oh.rows[0]["score"]

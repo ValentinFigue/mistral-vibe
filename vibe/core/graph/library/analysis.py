@@ -601,25 +601,86 @@ async def concat(top: Table, bottom: Table) -> Table:
 async def fill_missing(
     table: Table,
     column: str,
-    method: Literal["value", "mean", "median", "ffill", "bfill"] = "value",
+    method: Literal["value", "mean", "median", "mode", "ffill", "bfill"] = "value",
     value: Any = None,
 ) -> Table:
-    """Fill missing values in ``column``. method ∈ value, mean, median, ffill, bfill."""
+    """Fill missing values in ``column``. method ∈ value, mean, median, mode, ffill, bfill."""
     import pandas as pd
 
     _need(table, column)
-    if method not in {"value", "mean", "median", "ffill", "bfill"}:
-        raise ValueError(f"fill_missing: method must be value/mean/median/ffill/bfill, got {method!r}")
+    if method not in {"value", "mean", "median", "mode", "ffill", "bfill"}:
+        raise ValueError(
+            f"fill_missing: method must be value/mean/median/mode/ffill/bfill, got {method!r}"
+        )
     if method == "value" and value is None:
-        raise ValueError("fill_missing: method='value' needs a `value` (or use mean/median/ffill/bfill)")
+        raise ValueError("fill_missing: method='value' needs a `value` (or use mean/median/mode/ffill/bfill)")
     df = _to_df(table)
     if method == "value":
         df[column] = df[column].fillna(value)
     elif method in {"mean", "median"}:
         num = pd.to_numeric(df[column], errors="coerce")
         df[column] = num.fillna(getattr(num, method)())
+    elif method == "mode":
+        modes = df[column].mode()  # can be empty (all-null) or multi-valued (ties) → take the first
+        if len(modes):
+            df[column] = df[column].fillna(modes.iloc[0])
     else:
         df[column] = df[column].ffill() if method == "ffill" else df[column].bfill()
+    return _from_df(df)
+
+
+@operator(library=_LIB)
+async def normalize(
+    table: Table,
+    column: str,
+    method: Literal["minmax", "zscore"] = "minmax",
+    name: str | None = None,
+) -> Table:
+    """Scale a numeric ``column`` in place (or into ``name``). minmax → ``(x−min)/(max−min)`` in
+    [0, 1] (a constant column → all 0); zscore → ``(x−mean)/std`` with population std (ddof=0),
+    matching scikit-learn's StandardScaler.
+    """
+    import pandas as pd
+
+    _require_numeric(table, column, "normalize")
+    if method not in {"minmax", "zscore"}:
+        raise ValueError(f"normalize: method must be minmax/zscore, got {method!r}")
+    df = _to_df(table)
+    s = pd.to_numeric(df[column], errors="coerce")
+    if method == "minmax":
+        lo, hi = s.min(), s.max()
+        scaled = (s - lo) / (hi - lo) if hi != lo else s * 0.0
+    else:
+        sd = s.std(ddof=0)
+        scaled = (s - s.mean()) / sd if sd else s * 0.0
+    df[name or column] = scaled
+    return _from_df(df)
+
+
+@operator(library=_LIB)
+async def encode(
+    table: Table,
+    column: str,
+    method: Literal["label", "onehot"] = "label",
+    name: str | None = None,
+) -> Table:
+    """Encode a categorical ``column``. label → integer codes ``0..k−1`` by sorted category value
+    (matching scikit-learn's LabelEncoder), in place or into ``name``. onehot → append integer
+    ``{column}_{value}`` indicator columns and drop the original.
+    """
+    import pandas as pd
+
+    _need(table, column)
+    df = _to_df(table)
+    if method == "label":
+        cats = sorted(df[column].dropna().unique(), key=str)
+        mapping = {c: i for i, c in enumerate(cats)}
+        df[name or column] = df[column].map(mapping).astype("Int64")
+    elif method == "onehot":
+        dummies = pd.get_dummies(df[column], prefix=column).astype(int)
+        df = pd.concat([df.drop(columns=[column]), dummies], axis=1)
+    else:
+        raise ValueError(f"encode: method must be label/onehot, got {method!r}")
     return _from_df(df)
 
 
@@ -656,17 +717,160 @@ async def bin_column(table: Table, column: str, bins: int = 4, name: str | None 
 
 
 @operator(library=_LIB)
-async def correlation(table: Table, columns: list[str] | None = None) -> Table:
-    """Pearson correlation matrix over numeric columns (a ``field`` label col + one col each)."""
+async def correlation(
+    table: Table,
+    columns: list[str] | None = None,
+    method: Literal["pearson", "spearman", "kendall"] = "pearson",
+) -> Table:
+    """Correlation matrix over numeric columns (a ``field`` label col + one col each). method ∈
+    pearson, spearman, kendall. For a coefficient **with a p-value** on two columns, use ``corr_test``.
+    """
     import pandas as pd
 
+    if method not in {"pearson", "spearman", "kendall"}:
+        raise ValueError(f"correlation: method must be pearson/spearman/kendall, got {method!r}")
     cols = _cols(columns) or [c for c in table.columns if _column_is_numeric(table, c)]
     _need(table, *cols)
     for c in cols:
         _require_numeric(table, c, "correlation")
     num = _to_df(table)[cols].apply(pd.to_numeric, errors="coerce")
     # label column "field" (not "column" — a SQL reserved word) so a downstream sql() can select it
-    return _from_df(num.corr().round(4).reset_index(names="field"))
+    return _from_df(num.corr(method=method).round(4).reset_index(names="field"))
+
+
+# --- inferential statistics (scipy.stats — a base dep via scikit-learn, lazy-imported) -----
+# These ops report a test statistic and, where defined, a p-value — the analyst composes any
+# significance verdict (e.g. |r|≥0.5 and p<0.05) itself; there is no built-in rubric. Pure &
+# deterministic, so they cache normally.
+
+_CORR_MIN_N = 3  # scipy.stats.pearsonr needs ≥3 pairs for a defined p-value
+_SHAPIRO_MIN_N = 3
+_NORMALTEST_MIN_N = 8  # D'Agostino-Pearson normaltest needs ≥8 samples
+_ANDERSON_5PCT_LEVEL = 5.0  # Anderson-Darling significance level whose critical value we report
+_TWO_GROUPS = 2  # ttest/welch/mannwhitney compare exactly two groups
+_MIN_CATEGORIES = 2  # chi-square needs a ≥2×2 contingency table
+
+
+@operator(library=_LIB)
+async def corr_test(
+    table: Table,
+    x: str,
+    y: str,
+    method: Literal["pearson", "spearman", "kendall"] = "pearson",
+) -> Table:
+    """Correlation between two numeric columns **with a significance test** — a 1-row table
+    (``coefficient``, ``p_value``, ``n``). method ∈ pearson, spearman, kendall. Rows missing x or y
+    are dropped; needs ≥3 complete pairs. End in ``to_markdown`` to report both, or slice one value
+    into ``answer``.
+    """
+    import pandas as pd
+    from scipy import stats
+
+    _need(table, x, y)
+    df = _to_df(table)[[x, y]].apply(pd.to_numeric, errors="coerce").dropna()
+    if len(df) < _CORR_MIN_N:
+        raise ValueError(f"corr_test: need ≥{_CORR_MIN_N} complete (x, y) pairs, got {len(df)}")
+    fn = {"pearson": stats.pearsonr, "spearman": stats.spearmanr, "kendall": stats.kendalltau}[method]
+    res = fn(df[x].to_numpy(), df[y].to_numpy())
+    return _from_df(pd.DataFrame([{"coefficient": float(res[0]), "p_value": float(res[1]), "n": len(df)}]))
+
+
+@operator(library=_LIB)
+async def normality_test(
+    table: Table,
+    column: str,
+    method: Literal["shapiro", "normaltest", "anderson"] = "shapiro",
+) -> Table:
+    """Test whether a numeric ``column`` is normally distributed — a 1-row table (``statistic``,
+    ``p_value``, ``critical_value``). shapiro/normaltest report ``p_value`` (reject normality if
+    p < α); anderson reports ``statistic`` + the 5% ``critical_value`` (reject if statistic >
+    critical_value). Missing values dropped; shapiro needs ≥3, normaltest ≥8.
+    """
+    import pandas as pd
+    from scipy import stats
+
+    _need(table, column)
+    s = pd.to_numeric(_to_df(table)[column], errors="coerce").dropna().to_numpy()
+    stat: float | None = None
+    p_value: float | None = None
+    critical: float | None = None
+    if method == "shapiro":
+        if len(s) < _SHAPIRO_MIN_N:
+            raise ValueError(f"normality_test: shapiro needs ≥{_SHAPIRO_MIN_N} values, got {len(s)}")
+        res = stats.shapiro(s)
+        stat, p_value = float(res[0]), float(res[1])
+    elif method == "normaltest":
+        if len(s) < _NORMALTEST_MIN_N:
+            raise ValueError(f"normality_test: normaltest needs ≥{_NORMALTEST_MIN_N} values, got {len(s)}")
+        res = stats.normaltest(s)
+        stat, p_value = float(res[0]), float(res[1])
+    elif method == "anderson":
+        res = stats.anderson(s, dist="norm")
+        levels = [round(float(x), 1) for x in res.significance_level]
+        idx = levels.index(_ANDERSON_5PCT_LEVEL) if _ANDERSON_5PCT_LEVEL in levels else 2
+        stat, critical = float(res.statistic), float(res.critical_values[idx])
+    else:
+        raise ValueError(f"normality_test: method must be shapiro/normaltest/anderson, got {method!r}")
+    return _from_df(pd.DataFrame([{"statistic": stat, "p_value": p_value, "critical_value": critical}]))
+
+
+@operator(library=_LIB)
+async def group_test(
+    table: Table,
+    value: str,
+    group: str,
+    test: Literal["ttest", "welch", "mannwhitney", "anova", "kruskal"] = "ttest",
+) -> Table:
+    """Test whether numeric ``value`` differs across the categories in ``group`` — a 1-row table
+    (``statistic``, ``p_value``, ``n_groups``). ttest (Student), welch (unequal-variance t-test) and
+    mannwhitney (rank-sum) compare **exactly two** groups; anova (one-way F) and kruskal compare two
+    or more. Rows missing ``value`` or ``group`` are dropped.
+    """
+    import pandas as pd
+    from scipy import stats
+
+    _need(table, value, group)
+    df = _to_df(table)[[value, group]].copy()
+    df[value] = pd.to_numeric(df[value], errors="coerce")
+    df = df.dropna(subset=[value, group])
+    samples = [g[value].to_numpy() for _, g in df.groupby(group) if len(g)]
+    n_groups = len(samples)
+    if test in {"ttest", "welch", "mannwhitney"} and n_groups != _TWO_GROUPS:
+        raise ValueError(f"group_test: test={test!r} needs exactly {_TWO_GROUPS} groups, got {n_groups}")
+    if test in {"anova", "kruskal"} and n_groups < _TWO_GROUPS:
+        raise ValueError(f"group_test: test={test!r} needs ≥{_TWO_GROUPS} groups, got {n_groups}")
+    if test == "ttest":
+        res = stats.ttest_ind(samples[0], samples[1], equal_var=True)
+    elif test == "welch":
+        res = stats.ttest_ind(samples[0], samples[1], equal_var=False)
+    elif test == "mannwhitney":
+        res = stats.mannwhitneyu(samples[0], samples[1])
+    elif test == "anova":
+        res = stats.f_oneway(*samples)
+    elif test == "kruskal":
+        res = stats.kruskal(*samples)
+    else:
+        raise ValueError(f"group_test: test must be ttest/welch/mannwhitney/anova/kruskal, got {test!r}")
+    return _from_df(pd.DataFrame([{"statistic": float(res[0]), "p_value": float(res[1]), "n_groups": n_groups}]))
+
+
+@operator(library=_LIB)
+async def chi_square(table: Table, column1: str, column2: str) -> Table:
+    """Chi-square test of independence between two categorical columns — a 1-row table
+    (``statistic``, ``p_value``, ``dof``), from the contingency table of the two columns.
+    """
+    import pandas as pd
+    from scipy import stats
+
+    _need(table, column1, column2)
+    df = _to_df(table)[[column1, column2]].dropna()
+    ct = pd.crosstab(df[column1], df[column2])
+    if ct.shape[0] < _MIN_CATEGORIES or ct.shape[1] < _MIN_CATEGORIES:
+        raise ValueError(
+            f"chi_square: need ≥{_MIN_CATEGORIES} categories in each column, got table shape {ct.shape}"
+        )
+    chi2, p_value, dof, _ = stats.chi2_contingency(ct)
+    return _from_df(pd.DataFrame([{"statistic": float(chi2), "p_value": float(p_value), "dof": int(dof)}]))
 
 
 @operator(library=_LIB)
@@ -738,6 +942,25 @@ async def outliers_iqr(table: Table, column: str, k: float = 1.5) -> Table:
 
 
 @operator(library=_LIB)
+async def outliers_zscore(table: Table, column: str, threshold: float = 3.0) -> Table:
+    """Z-score outliers of a numeric ``column``: values with ``|z| > threshold`` where
+    ``z = (x − mean) / std`` (population std, ddof=0). Returns a 1-row summary — ``lower``, ``upper``
+    (the fences), ``count`` (outliers), ``total``.
+    """
+    import pandas as pd
+
+    _require_numeric(table, column, "outliers_zscore")
+    s = pd.to_numeric(_to_df(table)[column], errors="coerce").dropna()
+    if s.empty:
+        return _from_df(pd.DataFrame([{"lower": None, "upper": None, "count": 0, "total": 0}]))
+    mean, sd = float(s.mean()), float(s.std(ddof=0))
+    lower, upper = mean - threshold * sd, mean + threshold * sd
+    count = int(((s < lower) | (s > upper)).sum()) if sd else 0
+    row = {"lower": round(lower, 4), "upper": round(upper, 4), "count": count, "total": int(len(s))}
+    return _from_df(pd.DataFrame([row]))
+
+
+@operator(library=_LIB)
 async def distribution(table: Table, column: str) -> Table:
     """Shape of a numeric ``column`` — a 1-row table: mean, std, skewness, kurtosis (Fisher)."""
     import pandas as pd
@@ -772,10 +995,29 @@ def _require_sklearn() -> None:
         raise ValueError("ML operators need scikit-learn, which is a base dependency of vibe.") from exc
 
 
-def _ml_xy(table: Table, target: str, features: list[str]) -> tuple[Any, Any]:
-    """Build (X, y): one-hot-encode categorical features, drop rows with any missing value."""
+def _encode_features(x_df: Any, encode: str) -> Any:
+    """Encode an X frame for an estimator. ``onehot`` → ``pd.get_dummies`` (categoricals only;
+    numerics pass through). ``label`` → integer codes (sorted category) for object columns only,
+    numerics untouched — so a question that "label-encodes the features" is reproduced.
+    """
     import pandas as pd
 
+    if encode == "label":
+        out = x_df.copy()
+        for col in out.columns:
+            if not pd.api.types.is_numeric_dtype(out[col]):  # encode only non-numeric features
+                cats = sorted(out[col].dropna().unique(), key=str)
+                out[col] = out[col].map({c: i for i, c in enumerate(cats)})
+        return out
+    if encode == "onehot":
+        return pd.get_dummies(x_df)
+    raise ValueError(f"ml: encode must be onehot/label, got {encode!r}")
+
+
+def _ml_xy(table: Table, target: str, features: list[str], encode: str = "onehot") -> tuple[Any, Any]:
+    """Build (X, y): encode categorical features (``encode`` ∈ onehot|label), drop rows with any
+    missing value.
+    """
     feats = _cols(features)
     if not feats:
         raise ValueError("ml: `features` must list at least one column")
@@ -783,7 +1025,7 @@ def _ml_xy(table: Table, target: str, features: list[str]) -> tuple[Any, Any]:
     df = _to_df(table)[[*feats, target]].dropna()
     if len(df) <= 1:
         raise ValueError("ml: need at least 2 complete rows after dropping missing values")
-    return pd.get_dummies(df[feats]), df[target]
+    return _encode_features(df[feats], encode), df[target]
 
 
 def _score_table(value: float) -> Table:
@@ -914,7 +1156,7 @@ def _evaluate_estimator(
 
 
 @operator(library=_LIB)
-async def ml_regression(
+async def ml_regression(  # noqa: PLR0913, PLR0917 (typed ML knobs; executor binds by keyword)
     table: Table,
     target: str,
     features: list[str],
@@ -925,6 +1167,7 @@ async def ml_regression(
     random_state: int = _ML_RANDOM_STATE,
     scale: bool = False,
     cv_folds: int = _CV_FOLDS,
+    encode: Literal["onehot", "label"] = "onehot",
 ) -> Table:
     """Fit a regression model and return a 1×1 ``score`` table (reproduces scikit-learn defaults).
     ``evaluate``: ``holdout`` (train/test split, score on test), ``full`` (fit on all rows, score on
@@ -940,7 +1183,7 @@ async def ml_regression(
     models = _reg_models(random_state)
     if model not in models:
         raise ValueError(f"ml_regression: model must be one of {sorted(models)}, got {model!r}")
-    x, y = _ml_xy(table, target, features)
+    x, y = _ml_xy(table, target, features, encode=encode)
     y = pd.to_numeric(y, errors="coerce")
     score = _evaluate_estimator(
         models[model], x, y, evaluate=evaluate, scorer=_reg_scorer(metric),
@@ -951,7 +1194,7 @@ async def ml_regression(
 
 
 @operator(library=_LIB)
-async def ml_classification(
+async def ml_classification(  # noqa: PLR0913, PLR0917 (typed ML knobs; executor binds by keyword)
     table: Table,
     target: str,
     features: list[str],
@@ -962,6 +1205,7 @@ async def ml_classification(
     random_state: int = _ML_RANDOM_STATE,
     scale: bool = False,
     cv_folds: int = _CV_FOLDS,
+    encode: Literal["onehot", "label"] = "onehot",
 ) -> Table:
     """Fit a classifier and return a 1×1 ``score`` table (reproduces scikit-learn defaults).
     ``evaluate``: ``holdout`` (train/test split, score on test), ``full`` (fit + score on all rows),
@@ -976,7 +1220,7 @@ async def ml_classification(
     models = _clf_models(random_state)
     if model not in models:
         raise ValueError(f"ml_classification: model must be one of {sorted(models)}, got {model!r}")
-    x, y = _ml_xy(table, target, features)
+    x, y = _ml_xy(table, target, features, encode=encode)
     score = _evaluate_estimator(
         models[model], x, y, evaluate=evaluate, scorer=_clf_scorer(metric),
         cv_scoring=_CLF_CV_SCORING[metric], test_size=test_size, random_state=random_state,
@@ -992,13 +1236,13 @@ async def ml_cluster(
     k: int,
     metric: Literal["silhouette", "inertia"] = "silhouette",
     random_state: int = _ML_RANDOM_STATE,
+    encode: Literal["onehot", "label"] = "onehot",
 ) -> Table:
-    """K-means over ``features`` (categoricals one-hot encoded, missing rows dropped) — a 1×1 table
-    (``score``): ``silhouette`` (cohesion/separation, higher is better) or ``inertia``.
+    """K-means over ``features`` (categoricals encoded per ``encode``, missing rows dropped) — a 1×1
+    table (``score``): ``silhouette`` (cohesion/separation, higher is better) or ``inertia``.
     Deterministic for a given ``random_state``.
     """
     _require_sklearn()
-    import pandas as pd
     from sklearn.cluster import KMeans
     from sklearn.metrics import silhouette_score
 
@@ -1006,7 +1250,7 @@ async def ml_cluster(
         raise ValueError(f"ml_cluster: metric must be silhouette/inertia, got {metric!r}")
     feats = _cols(features)
     _need(table, *feats)
-    x = pd.get_dummies(_to_df(table)[feats].dropna())
+    x = _encode_features(_to_df(table)[feats].dropna(), encode)
     if len(x) <= k:
         raise ValueError(f"ml_cluster: need more rows ({len(x)}) than clusters (k={k})")
     km = KMeans(n_clusters=k, random_state=random_state, n_init=10).fit(x)
@@ -1041,6 +1285,7 @@ async def feature_importance(
     model: Literal["rf", "tree", "linear", "logreg"] = "rf",
     task: Literal["auto", "classification", "regression"] = "auto",
     random_state: int = _ML_RANDOM_STATE,
+    encode: Literal["onehot", "label"] = "onehot",
 ) -> Table:
     """Rank ``features`` by how much they predict ``target`` — a table of ``field, importance``
     (descending). rf/tree use impurity importances, linear/logreg use ``|coef|``. ``task=auto``
@@ -1053,7 +1298,7 @@ async def feature_importance(
 
     feats = _cols(features)
     resolved = task if task != "auto" else ("regression" if _column_is_numeric(table, target) else "classification")
-    x, y = _ml_xy(table, target, feats)
+    x, y = _ml_xy(table, target, feats, encode=encode)
     y_fit = pd.to_numeric(y, errors="coerce") if resolved == "regression" else y.astype("str")
     est = _fi_estimator(model, resolved, random_state)
     est.fit(x, y_fit)
@@ -1077,7 +1322,7 @@ async def feature_importance(
 
 
 @operator(library=_LIB)
-async def ml_predict(  # noqa: PLR0914 (fit/split/scale/predict/assemble is inherently several locals)
+async def ml_predict(  # noqa: PLR0914, PLR0913, PLR0917 (typed ML knobs; executor binds by keyword)
     table: Table,
     target: str,
     features: list[str],
@@ -1091,12 +1336,13 @@ async def ml_predict(  # noqa: PLR0914 (fit/split/scale/predict/assemble is inhe
     test_size: float = 0.2,
     random_state: int = _ML_RANDOM_STATE,
     scale: bool = False,
+    encode: Literal["onehot", "label"] = "onehot",
 ) -> Table:
     """Fit a model and return **per-row predictions** — a table of ``[*features, target, {target}_pred]``.
     ``evaluate`` fits on the train split (``holdout``) or all rows (``full``); ``on`` predicts the held-out
     ``test`` rows or ``all`` rows. Use for "predict …" questions, then ``filter_rows``/``answer`` to read a
     value. model must match ``task`` (regression: linear|ridge|lasso|tree|rf|gbr|knn|svr; classification:
-    logreg|tree|rf|gbm|knn|svc|nb). Categorical features one-hot encoded, missing rows dropped.
+    logreg|tree|rf|gbm|knn|svc|nb). Categorical features encoded per ``encode``, missing rows dropped.
     """
     _require_sklearn()
     import pandas as pd
@@ -1114,7 +1360,7 @@ async def ml_predict(  # noqa: PLR0914 (fit/split/scale/predict/assemble is inhe
     df = _to_df(table)[[*feats, target]].dropna()
     if len(df) <= 1:
         raise ValueError("ml_predict: need at least 2 complete rows after dropping missing values")
-    x = pd.get_dummies(df[feats])
+    x = _encode_features(df[feats], encode)
     y = pd.to_numeric(df[target], errors="coerce") if task == "regression" else df[target]
 
     if evaluate == "full":

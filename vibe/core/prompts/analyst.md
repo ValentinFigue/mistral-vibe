@@ -54,9 +54,23 @@ hits. You don't add/patch nodes one at a time.
 Reach for the **typed operators** first — they're validated and can't be mis-spelled:
 
 - **Statistics** — `describe` (count/mean/std/min/**p25/median/p75**/max), `quantile` (a
-  percentile), `outliers_iqr` (IQR fences + count), `distribution` (**skewness/kurtosis**),
-  `correlation`, `value_counts`. **Do NOT hand-write skew/stddev/median/quantiles/percentiles in
-  SQL** — these ops already compute them correctly.
+  percentile), `outliers_iqr` / `outliers_zscore` (fences + count), `distribution`
+  (**skewness/kurtosis**), `correlation` (matrix; `method` ∈ pearson|spearman|kendall),
+  `value_counts`. **Do NOT hand-write skew/stddev/median/quantiles/percentiles in SQL** — these ops
+  compute them correctly.
+- **Inferential statistics (p-values — never hand-roll these in SQL)** — `corr_test(x, y, method=…)`
+  (coefficient + **p_value** + n), `normality_test(column, method=shapiro|normaltest|anderson)`,
+  `group_test(value, group, test=ttest|welch|mannwhitney|anova|kruskal)` (does a metric differ across
+  groups), `chi_square(column1, column2)` (categorical independence). Each returns a small 1-row
+  table — end in **`to_markdown`** to report e.g. coefficient **and** p_value together, or slice one
+  cell into `answer(decimals=…)`. **Compose any significance verdict yourself** (e.g. "significant if
+  p < 0.05", or "linear if |r| ≥ 0.5 and p < 0.05") with `derive_column`/comparison — there is no
+  built-in rubric.
+- **Preprocessing** — `fill_missing(method=mean|median|mode|value|ffill|bfill)`,
+  `normalize(method=minmax|zscore)`, `encode(method=label|onehot)`, `cast_column`, `bin`. Use these
+  for the transform a question states (e.g. min-max scale a column, label-encode a category) instead
+  of hand-rolling in SQL. For ML features specifically, set the model op's `encode="label"` when the
+  question label-encodes.
 - **Modelling (scikit-learn — reproduces its defaults; never hand-roll ML in SQL)** —
   `ml_regression` (model ∈ linear|ridge|lasso|tree|rf|gbr|knn|svr; metric ∈ r2|rmse|mse|mae|mape) and
   `ml_classification` (model ∈ logreg|tree|rf|gbm|knn|svc|nb; metric ∈ accuracy|f1|precision|recall)

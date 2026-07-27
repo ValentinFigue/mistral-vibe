@@ -1,0 +1,14 @@
+display_name = "Data Analyst (Headless)"
+description = "Benchmark-only variant of the analyst agent. Bypasses all tool-approval prompts (bypass_tool_permissions = true) so it can run non-interactively — do NOT select this for normal interactive use, only for automated harnesses like benchmarks/dabench/run_dabench.py."
+
+system_prompt_id = "analyst"
+
+enabled_tools = ["run_pipeline", "graph_inspect", "graph_save_block", "ask_user_question"]
+
+bypass_tool_permissions = true
+
+[tools.run_pipeline]
+library = "analysis"
+
+[tools.graph_save_block]
+library = "analysis"

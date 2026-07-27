@@ -194,14 +194,14 @@ pythonVersion = "3.12"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 
-include = ["vibe/**/*.py", "tests/**/*.py"]
-exclude = ["pyinstaller/"]
+include = ["vibe/**/*.py", "tests/**/*.py", "benchmarks/**/*.py"]
+exclude = ["pyinstaller/", "benchmarks/dabench/vendor/"]
 venvPath = "."
 venv = ".venv"
 
 [tool.ruff]
-include = ["vibe/**/*.py", "tests/**/*.py"]
-exclude = ["pyinstaller/"]
+include = ["vibe/**/*.py", "tests/**/*.py", "benchmarks/**/*.py"]
+exclude = ["pyinstaller/", "benchmarks/dabench/vendor/"]
 line-length = 88
 target-version = "py312"
 preview = true
@@ -231,6 +231,7 @@ ignore = ["D203", "D205", "D213", "ANN401", "PLR6301"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN", "PLR"]
+"benchmarks/dabench/tests/*" = ["ANN", "PLR"]
 
 
 [tool.ruff.lint.flake8-tidy-imports]

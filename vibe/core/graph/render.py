@@ -57,7 +57,11 @@ def table_schema(payload: str) -> str | None:
     parts = [f"{c}:{infer_dtype([r.get(c) for r in rows[:_DTYPE_SAMPLE]])}" for c in shown]
     if len(columns) > _MAX_SCHEMA_COLS:
         parts.append(f"+{len(columns) - _MAX_SCHEMA_COLS} more")
-    return f"{', '.join(parts)} ({len(rows)} rows)"
+    schema = f"{', '.join(parts)} ({len(rows)} rows)"
+    notes: list[str] = list(data.get("notes") or [])
+    if notes:
+        schema += f" — {'; '.join(notes)}"
+    return schema
 
 
 class _CacheLike(Protocol):

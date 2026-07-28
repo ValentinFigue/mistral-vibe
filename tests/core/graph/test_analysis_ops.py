@@ -254,6 +254,82 @@ async def test_read_csv_keeps_zero_padded_ids(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_csv_recognizes_standard_na_tokens(tmp_path) -> None:
+    # Regression: only '' used to be treated as missing; standard na_values tokens (matching
+    # pandas.read_csv's defaults) must also become None, in both string and numeric columns.
+    p = tmp_path / "na.csv"
+    p.write_text("dept,age\neng,30\nN/A,NaN\nnull,25\nsales,None\n")
+    t = await A.read_csv(path=str(p), content_fp="x")
+    assert [r["dept"] for r in t.rows] == ["eng", None, None, "sales"]
+    assert [r["age"] for r in t.rows] == [30, None, 25, None]
+
+
+@pytest.mark.asyncio
+async def test_read_csv_na_token_does_not_downgrade_numeric_column_to_strings(tmp_path) -> None:
+    # Regression: a stray NA token used to make _all(int)/_all(float) raise, silently
+    # stringifying the *whole* column, including the genuinely-numeric values.
+    p = tmp_path / "na2.csv"
+    p.write_text("n\n1\nNA\n3\n")
+    t = await A.read_csv(path=str(p), content_fp="x")
+    assert t.rows == [{"n": 1}, {"n": None}, {"n": 3}]
+    assert all(isinstance(r["n"], int) for r in t.rows if r["n"] is not None)
+
+
+@pytest.mark.asyncio
+async def test_sql_is_null_groupby_matches_pandas_na_handling(tmp_path) -> None:
+    # Regression: the exact DABench failure mode — "mean of X grouped by whether Y is
+    # null" came out wrong because a handful of "N/A"-token rows were misclassified as
+    # non-null by DuckDB's IS NULL, before the _coerce_column fix. Cross-check against
+    # plain pandas.read_csv's default na_values handling of the same file.
+    p = tmp_path / "grp.csv"
+    p.write_text("tree,nsnps\nA,10\n,20\nN/A,30\nB,40\nnull,50\n")
+    t = await A.read_csv(path=str(p), content_fp="x")
+    out = await A.sql(
+        query="""
+        SELECT tree IS NULL AS is_null, AVG(nsnps) AS mean_nsnps
+        FROM t1 GROUP BY 1 ORDER BY 1
+        """,
+        t1=t,
+    )
+    got = {r["is_null"]: r["mean_nsnps"] for r in out.rows}
+
+    import pandas as pd
+
+    ref = pd.read_csv(p)
+    is_null = ref["tree"].isna()
+    expected_true = float(ref.loc[is_null, "nsnps"].mean())
+    expected_false = float(ref.loc[~is_null, "nsnps"].mean())
+    assert got[True] == pytest.approx(expected_true)
+    assert got[False] == pytest.approx(expected_false)
+
+
+@pytest.mark.asyncio
+async def test_filter_rows_is_null_and_is_not_null() -> None:
+    t = A.Table(
+        columns=["dept", "salary"],
+        rows=[
+            {"dept": "eng", "salary": 100},
+            {"dept": None, "salary": None},
+            {"dept": "sales", "salary": 90},
+        ],
+    )
+    null_rows = await A.filter_rows(t, column="dept", op="is_null")
+    assert [r["dept"] for r in null_rows.rows] == [None]
+    not_null_rows = await A.filter_rows(t, column="salary", op="is_not_null")
+    assert [r["salary"] for r in not_null_rows.rows] == [100, 90]
+    # numeric column: is_null must not raise ("'val' is numeric but value '' isn't").
+    numeric_null = await A.filter_rows(t, column="salary", op="is_null")
+    assert len(numeric_null.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_filter_rows_is_null_value_is_optional() -> None:
+    t = A.Table(columns=["a"], rows=[{"a": 1}, {"a": None}])
+    out = await A.filter_rows(t, column="a", op="is_null")  # no `value` kwarg
+    assert len(out.rows) == 1
+
+
+@pytest.mark.asyncio
 async def test_join_is_a_real_merge_multiplying_dup_keys() -> None:
     # pandas merge: duplicate keys on the right multiply matching rows (standard SQL semantics),
     # rather than the old lookup that silently dropped matches.
@@ -465,6 +541,134 @@ async def test_ml_regression_matches_sklearn_reference() -> None:
         evaluate="holdout", test_size=0.2, random_state=42,
     )
     assert got_ho.rows[0]["score"] == pytest.approx(expected_ho, rel=1e-9)
+
+
+def _clf_table() -> A.Table:
+    return A.Table(
+        columns=["grp", "x", "y"],
+        rows=[
+            {"grp": "a", "x": 1.0, "y": 0}, {"grp": "a", "x": 1.1, "y": 0}, {"grp": "a", "x": 1.2, "y": 0},
+            {"grp": "a", "x": 1.3, "y": 0}, {"grp": "a", "x": 1.4, "y": 0}, {"grp": "a", "x": 1.5, "y": 0},
+            {"grp": "a", "x": 1.6, "y": 0}, {"grp": "a", "x": 1.7, "y": 0},
+            {"grp": "b", "x": 9.0, "y": 1}, {"grp": "b", "x": 9.5, "y": 1},
+        ],
+    )
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.asyncio
+async def test_ml_classification_class_weight_balanced_matches_sklearn() -> None:
+    import pandas as pd
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    t = _clf_table()
+    df = A._to_df(t)
+    x = pd.get_dummies(df[["grp", "x"]])
+    y = df["y"]
+    expected = accuracy_score(
+        y, LogisticRegression(class_weight="balanced", max_iter=100, random_state=42).fit(x, y).predict(x)
+    )
+    got = await A.ml_classification(
+        t, target="y", features=["grp", "x"], model="logreg", evaluate="full",
+        class_weight="balanced", random_state=42,
+    )
+    assert got.rows[0]["score"] == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.asyncio
+async def test_ml_classification_solver_liblinear_matches_sklearn() -> None:
+    import pandas as pd
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    t = _clf_table()
+    df = A._to_df(t)
+    x = pd.get_dummies(df[["grp", "x"]])
+    y = df["y"]
+    expected = accuracy_score(y, LogisticRegression(solver="liblinear", max_iter=100, random_state=42).fit(x, y).predict(x))
+    got = await A.ml_classification(
+        t, target="y", features=["grp", "x"], model="logreg", evaluate="full",
+        solver="liblinear", random_state=42,
+    )
+    assert got.rows[0]["score"] == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.asyncio
+async def test_ml_classification_max_iter_default_matches_sklearn_default() -> None:
+    # Regression: max_iter was hardcoded to 1000, contradicting the docstring's claim of
+    # reproducing sklearn defaults (sklearn's own default is 100).
+    import pandas as pd
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+
+    t = _clf_table()
+    df = A._to_df(t)
+    x = pd.get_dummies(df[["grp", "x"]])
+    y = df["y"]
+    expected = accuracy_score(y, LogisticRegression(random_state=42).fit(x, y).predict(x))
+    got = await A.ml_classification(t, target="y", features=["grp", "x"], model="logreg", evaluate="full", random_state=42)
+    assert got.rows[0]["score"] == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_ml_classification_class_weight_rejected_for_unsupported_model() -> None:
+    t = _clf_table()
+    with pytest.raises(ValueError, match="class_weight is not supported for model"):
+        await A.ml_classification(t, target="y", features=["x"], model="knn", class_weight="balanced")
+
+
+@pytest.mark.asyncio
+async def test_ml_classification_solver_rejected_for_non_logreg_model() -> None:
+    t = _clf_table()
+    with pytest.raises(ValueError, match="solver is only supported for model"):
+        await A.ml_classification(t, target="y", features=["x"], model="rf", solver="liblinear")
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.asyncio
+async def test_ml_regression_drop_first_matches_pandas_get_dummies() -> None:
+    import pandas as pd
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import mean_squared_error
+
+    t = await _sales()
+    df = A._to_df(t)[["region", "units", "revenue"]].dropna()
+    x_drop = pd.get_dummies(df[["region", "units"]], drop_first=True)
+    y = pd.to_numeric(df["revenue"], errors="coerce")
+    expected = mean_squared_error(y, LinearRegression().fit(x_drop, y).predict(x_drop))
+    got = await A.ml_regression(
+        t, target="revenue", features=["region", "units"], model="linear", metric="mse",
+        evaluate="full", drop_first=True,
+    )
+    assert got.rows[0]["score"] == pytest.approx(expected, rel=1e-9)
+    # sanity: drop_first actually changes the encoding (one fewer dummy column per category)
+    x_keep = pd.get_dummies(df[["region", "units"]])
+    assert x_drop.shape[1] < x_keep.shape[1]
+
+
+@pytest.mark.asyncio
+async def test_ml_xy_note_surfaces_dropped_row_count() -> None:
+    t = A.Table(
+        columns=["x", "y"],
+        rows=[
+            {"x": 1, "y": 1}, {"x": 2, "y": 2}, {"x": None, "y": 3}, {"x": 4, "y": None}, {"x": 5, "y": 5},
+        ],
+    )
+    out = await A.ml_regression(t, target="y", features=["x"], model="linear", evaluate="full")
+    assert out.notes and "dropped 2/5" in out.notes[0]
+    # answer() still accepts the 1x1 score table unchanged despite the extra `notes` field
+    ans = await A.answer(out, decimals=2)
+    assert isinstance(ans.markdown, str)
+
+
+@pytest.mark.asyncio
+async def test_ml_xy_no_note_when_nothing_dropped() -> None:
+    t = A.Table(columns=["x", "y"], rows=[{"x": 1, "y": 1}, {"x": 2, "y": 2}, {"x": 3, "y": 3}])
+    out = await A.ml_regression(t, target="y", features=["x"], model="linear", evaluate="full")
+    assert out.notes == []
 
 
 @pytest.mark.timeout(60)
@@ -716,6 +920,88 @@ async def test_normality_and_chi_square_match_scipy() -> None:
     exp = stats.chi2_contingency(pd.crosstab([r["sex"] for r in ct.rows], [r["survived"] for r in ct.rows]))
     assert chi.rows[0]["statistic"] == pytest.approx(float(exp[0]), rel=1e-9)
     assert chi.rows[0]["dof"] == int(exp[2])
+
+
+def _confounded_regression_table() -> A.Table:
+    # A textbook Simpson's-paradox setup: within each pclass, fare clearly *decreases* with age
+    # (slope -5), but pclass 1 (old passengers) is also the most expensive class overall — so the
+    # unconditional/bivariate age-fare trend is strongly *positive*, flipping sign once pclass is
+    # controlled for. Verified numerically: bivariate corr(age, fare) ≈ +0.99, but the true
+    # partial coefficient of age (holding pclass fixed) is exactly -5.0.
+    rows = []
+    for pclass, base_fare, ages in (
+        (1, 200.0, [68, 69, 70, 71, 72]),
+        (2, 100.0, [38, 39, 40, 41, 42]),
+        (3, 20.0, [8, 9, 10, 11, 12]),
+    ):
+        mean_age = sum(ages) / len(ages)
+        for age in ages:
+            rows.append({"age": float(age), "pclass": float(pclass), "fare": base_fare - 5.0 * (age - mean_age)})
+    return A.Table(columns=["age", "pclass", "fare"], rows=rows)
+
+
+@pytest.mark.asyncio
+async def test_regression_summary_matches_statsmodels_ols() -> None:
+    import statsmodels.api as sm
+
+    t = _confounded_regression_table()
+    df = A._to_df(t)
+    x = sm.add_constant(df[["age", "pclass"]])
+    ref = sm.OLS(df["fare"], x).fit()
+
+    got = await A.regression_summary(t, target="fare", features=["age", "pclass"])
+    by_field = {r["field"]: r for r in got.rows}
+
+    assert by_field["Intercept"]["coef"] == pytest.approx(ref.params["const"], rel=1e-6)
+    assert by_field["age"]["coef"] == pytest.approx(ref.params["age"], rel=1e-6)
+    assert by_field["pclass"]["coef"] == pytest.approx(ref.params["pclass"], rel=1e-6)
+    assert by_field["age"]["std_err"] == pytest.approx(ref.bse["age"], rel=1e-6)
+    assert by_field["age"]["t_stat"] == pytest.approx(ref.tvalues["age"], rel=1e-6)
+    assert by_field["age"]["p_value"] == pytest.approx(ref.pvalues["age"], rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_regression_summary_controls_for_confounder_unlike_bivariate_corr() -> None:
+    # The actual DABench failure mode: a bivariate corr_test(age, fare) sign-flips relative to
+    # regression_summary's age coefficient once pclass is controlled for.
+    t = _confounded_regression_table()
+    bivariate = await A.corr_test(t, x="age", y="fare")
+    controlled = await A.regression_summary(t, target="fare", features=["age", "pclass"])
+    age_coef = next(r["coef"] for r in controlled.rows if r["field"] == "age")
+    assert (bivariate.rows[0]["coefficient"] > 0) != (age_coef > 0)
+
+
+@pytest.mark.asyncio
+async def test_regression_summary_intercept_false_omits_intercept_row() -> None:
+    t = _confounded_regression_table()
+    got = await A.regression_summary(t, target="fare", features=["age", "pclass"], intercept=False)
+    assert [r["field"] for r in got.rows] == ["age", "pclass"]
+
+
+@pytest.mark.asyncio
+async def test_regression_summary_rejects_non_numeric_feature() -> None:
+    t = A.Table(columns=["x", "y"], rows=[{"x": "a", "y": 1.0}, {"x": "b", "y": 2.0}, {"x": "c", "y": 3.0}])
+    with pytest.raises(ValueError, match="not numeric"):
+        await A.regression_summary(t, target="y", features=["x"])
+
+
+@pytest.mark.asyncio
+async def test_regression_summary_raises_on_collinear_features() -> None:
+    # x2 is an exact linear function of x — the design matrix is singular even with plenty of
+    # rows to spare for degrees of freedom, so this must fail on collinearity, not row count.
+    t = A.Table(
+        columns=["x", "x2", "y"],
+        rows=[{"x": float(i), "x2": float(2 * i), "y": float(i)} for i in range(1, 8)],
+    )
+    with pytest.raises(ValueError, match="collinear"):
+        await A.regression_summary(t, target="y", features=["x", "x2"])
+
+
+@pytest.mark.asyncio
+async def test_regression_summary_raises_on_insufficient_dof() -> None:
+    t = A.Table(columns=["x", "y"], rows=[{"x": 1.0, "y": 1.0}, {"x": 2.0, "y": 2.0}])
+    with pytest.raises(ValueError, match="degrees of freedom"):
+        await A.regression_summary(t, target="y", features=["x"])
 
 
 # --- preprocessing transforms --------------------------------------------------------------

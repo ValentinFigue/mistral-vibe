@@ -181,7 +181,7 @@ def test_run_one_returns_empty_response_on_nonzero_exit(tmp_path):
     with patch("run_dabench.subprocess.run", side_effect=fake_run):
         result = run_dabench.run_one(QUESTION, tables_dir, max_turns=10, max_price=None, timeout=60, keep_tmp=False)
 
-    assert result == {"id": 5, "response": ""}
+    assert result == {"id": 5, "response": "", "error": "nonzero_exit"}
 
 
 def test_run_one_returns_empty_response_on_timeout(tmp_path):
@@ -197,7 +197,51 @@ def test_run_one_returns_empty_response_on_timeout(tmp_path):
     with patch("run_dabench.subprocess.run", side_effect=fake_run):
         result = run_dabench.run_one(QUESTION, tables_dir, max_turns=10, max_price=None, timeout=1, keep_tmp=False)
 
-    assert result == {"id": 5, "response": ""}
+    assert result == {"id": 5, "response": "", "error": "timeout"}
+
+
+def test_run_one_classifies_turn_limit_exceeded(tmp_path):
+    tables_dir = tmp_path / "tables"
+    tables_dir.mkdir()
+    (tables_dir / "test_ave.csv").write_text("a,b\n1,2\n")
+
+    def fake_run(cmd, capture_output, text, timeout, env):
+        class Result:
+            returncode = 1
+            stdout = "<vibe_stop_event>Turn limit of 30 reached</vibe_stop_event>"
+            stderr = ""
+
+        return Result()
+
+    with patch("run_dabench.subprocess.run", side_effect=fake_run):
+        result = run_dabench.run_one(QUESTION, tables_dir, max_turns=10, max_price=None, timeout=60, keep_tmp=False)
+
+    assert result == {"id": 5, "response": "", "error": "turn_limit_exceeded"}
+
+
+def test_run_one_classifies_price_limit_exceeded(tmp_path):
+    tables_dir = tmp_path / "tables"
+    tables_dir.mkdir()
+    (tables_dir / "test_ave.csv").write_text("a,b\n1,2\n")
+
+    def fake_run(cmd, capture_output, text, timeout, env):
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "<vibe_stop_event>Price limit exceeded: $1.2000 > $1.00</vibe_stop_event>"
+
+        return Result()
+
+    with patch("run_dabench.subprocess.run", side_effect=fake_run):
+        result = run_dabench.run_one(QUESTION, tables_dir, max_turns=10, max_price=None, timeout=60, keep_tmp=False)
+
+    assert result == {"id": 5, "response": "", "error": "price_limit_exceeded"}
+
+
+def test_classify_failure():
+    assert run_dabench.classify_failure("Turn limit of 30 reached", "") == "turn_limit_exceeded"
+    assert run_dabench.classify_failure("", "Price limit exceeded: $2 > $1") == "price_limit_exceeded"
+    assert run_dabench.classify_failure("some other error", "boom") == "nonzero_exit"
 
 
 def _main_argv(questions_path, tables_dir, out_path, *extra):

@@ -155,3 +155,25 @@ def test_table_schema_compact_and_capped() -> None:
     wide = _json.dumps({"columns": [f"c{i}" for i in range(40)], "rows": []})
     sch = table_schema(wide)
     assert sch is not None and "+10 more" in sch and sch.endswith("(0 rows)")
+
+
+def test_table_schema_appends_notes_when_present() -> None:
+    import json as _json
+
+    from vibe.core.graph.render import table_schema
+
+    payload = _json.dumps({
+        "columns": ["score"], "rows": [{"score": 0.9}],
+        "notes": ["dropped 5/100 row(s) with a missing value in ['age']"],
+    })
+    assert table_schema(payload) == "score:float (1 rows) — dropped 5/100 row(s) with a missing value in ['age']"
+
+
+def test_table_schema_unchanged_when_notes_absent_or_empty() -> None:
+    import json as _json
+
+    from vibe.core.graph.render import table_schema
+
+    no_key = _json.dumps({"columns": ["a"], "rows": [{"a": 1}]})
+    empty_notes = _json.dumps({"columns": ["a"], "rows": [{"a": 1}], "notes": []})
+    assert table_schema(no_key) == table_schema(empty_notes) == "a:int (1 rows)"

@@ -66,7 +66,7 @@ _CATEGORY_BY_OP = {
     "correlation": "statistics", "value_counts": "statistics", "outliers": "statistics",
     # inferential statistics
     "corr_test": "inference", "normality_test": "inference", "group_test": "inference",
-    "chi_square": "inference",
+    "chi_square": "inference", "regression_summary": "inference",
     # machine learning
     "ml_regression": "ml", "ml_classification": "ml", "ml_cluster": "ml",
     "feature_importance": "ml", "ml_predict": "ml",
@@ -102,6 +102,9 @@ class Table(BaseModel):
 
     columns: list[str] = Field(default_factory=list)
     rows: list[dict[str, Any]] = Field(default_factory=list)
+    # Sidecar, non-tabular annotations (e.g. "dropped N rows with missing values") — never part of
+    # the table's shape, so operators like `answer()` that require a strict 1×1 table are unaffected.
+    notes: list[str] = Field(default_factory=list)
 
 
 class Report(BaseModel):
@@ -196,9 +199,37 @@ def _looks_zero_padded(v: str) -> bool:
     return len(v) > 1 and v[0] == "0" and v[1] != "."
 
 
+# Standard NA tokens, matching pandas.read_csv's default na_values (case-insensitive here, a
+# superset of pandas' actual mixed-case default, for robustness). A column value equal to one of
+# these (after stripping whitespace) is missing, not a real category like a two-letter code.
+_NA_TOKENS = frozenset(
+    {
+        "",
+        "nan",
+        "-nan",
+        "na",
+        "n/a",
+        "#n/a",
+        "#n/a n/a",
+        "#na",
+        "null",
+        "none",
+        "<na>",
+        "-1.#ind",
+        "-1.#qnan",
+        "1.#ind",
+        "1.#qnan",
+    }
+)
+
+
+def _is_na_token(v: str) -> bool:
+    return v.strip().lower() in _NA_TOKENS
+
+
 def _coerce_column(values: list[str]) -> list[Any]:
-    """Infer int/float/str for a column of raw strings; '' → None."""
-    non_empty = [v for v in values if v != ""]
+    """Infer int/float/str for a column of raw strings; a standard NA token → None."""
+    non_empty = [v for v in values if not _is_na_token(v)]
 
     def _all(parse: Any) -> bool:
         try:
@@ -211,12 +242,12 @@ def _coerce_column(values: list[str]) -> list[Any]:
     # Zero-padded values (zip codes, ids) look numeric but must stay text — coercing '01234' to
     # 1234 silently corrupts the identifier, and cast_column can't recover the lost zero.
     if any(_looks_zero_padded(v) for v in non_empty):
-        return [v if v != "" else None for v in values]
+        return [v if not _is_na_token(v) else None for v in values]
     if _all(int):
-        return [int(v) if v != "" else None for v in values]
+        return [int(v) if not _is_na_token(v) else None for v in values]
     if _all(float):
-        return [float(v) if v != "" else None for v in values]
-    return [v if v != "" else None for v in values]
+        return [float(v) if not _is_na_token(v) else None for v in values]
+    return [v if not _is_na_token(v) else None for v in values]
 
 
 def _parse_csv(text: str) -> Table:
@@ -310,6 +341,10 @@ async def drop_missing(table: Table, columns: list[str] | None = None) -> Table:
 
 
 def _compare(cell: Any, op: str, value: Any) -> bool:
+    if op == "is_null":
+        return cell is None
+    if op == "is_not_null":
+        return cell is not None
     if op == "contains":
         return value.lower() in str(cell).lower() if cell is not None else False
     if cell is None:
@@ -326,16 +361,21 @@ def _compare(cell: Any, op: str, value: Any) -> bool:
 async def filter_rows(
     table: Table,
     column: str,
-    value: str,
-    op: Literal["==", "!=", ">", ">=", "<", "<=", "contains"] = "==",
+    value: str = "",
+    op: Literal["==", "!=", ">", ">=", "<", "<=", "contains", "is_null", "is_not_null"] = "==",
 ) -> Table:
-    """Keep rows where ``column`` ``op`` ``value``. op ∈ ==, !=, >, >=, <, <=, contains."""
+    """Keep rows where ``column`` ``op`` ``value``.
+
+    op ∈ ==, !=, >, >=, <, <=, contains, is_null, is_not_null. ``value`` is ignored (and may be
+    omitted) for is_null/is_not_null — use these to isolate missing rows instead of ``==ing``
+    against an empty string, which is ambiguous with a real empty-string value.
+    """
     _need(table, column)
-    valid = ("==", "!=", ">", ">=", "<", "<=", "contains")
+    valid = ("==", "!=", ">", ">=", "<", "<=", "contains", "is_null", "is_not_null")
     if op not in valid:
         raise ValueError(f"filter_rows: op must be one of {list(valid)}, got {op!r}")
     typed: Any = value
-    if op != "contains" and _column_is_numeric(table, column):
+    if op not in {"contains", "is_null", "is_not_null"} and _column_is_numeric(table, column):
         try:
             typed = float(value)
         except ValueError as exc:
@@ -922,6 +962,73 @@ async def chi_square(table: Table, column1: str, column2: str) -> Table:
     return _from_df(pd.DataFrame([{"statistic": float(chi2), "p_value": float(p_value), "dof": int(dof)}]))
 
 
+_MIN_REGRESSION_DOF = 1
+
+
+def _ols_fit(x_arr: Any, y_arr: Any, dof: int) -> tuple[Any, Any, Any, Any]:
+    """Fit y = X·beta by least squares and return (beta, std_err, t_stat, p_value) per column."""
+    import numpy as np
+    from scipy import stats
+
+    beta, *_rest = np.linalg.lstsq(x_arr, y_arr, rcond=None)
+    resid = y_arr - x_arr @ beta
+    sigma2 = float(np.sum(resid**2)) / dof
+    try:
+        xtx_inv = np.linalg.inv(x_arr.T @ x_arr)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "regression_summary: features are perfectly collinear (singular X'X) — drop a redundant feature"
+        ) from exc
+    se = np.sqrt(np.diag(sigma2 * xtx_inv))
+    t_stat = beta / se
+    p_value = 2 * stats.t.sf(np.abs(t_stat), dof)
+    return beta, se, t_stat, p_value
+
+
+@_op()
+async def regression_summary(
+    table: Table,
+    target: str,
+    features: list[str],
+    intercept: bool = True,
+) -> Table:
+    """Multivariate OLS — one row per feature (plus ``"Intercept"`` when ``intercept=True``) with
+    the fitted ``coef``, its ``std_err``, ``t_stat``, and two-sided ``p_value``. Use this (not
+    ``corr_test``, which is bivariate) when a question wants a coefficient **controlling for** other
+    predictors — e.g. "fit target on A and B, report each coefficient and its significance."
+    Features/target must already be numeric (encode categoricals with ``encode``/``derive_column``
+    first); rows missing any of them are dropped.
+    """
+    import numpy as np
+    import pandas as pd
+
+    feats = _cols(features)
+    if not feats:
+        raise ValueError("regression_summary: `features` must list at least one column")
+    _require_numeric(table, target, "regression_summary")
+    for f in feats:
+        _require_numeric(table, f, "regression_summary")
+    df = _to_df(table)[[*feats, target]].apply(pd.to_numeric, errors="coerce").dropna()
+    n, k = len(df), len(feats)
+    dof = n - k - (1 if intercept else 0)
+    if dof < _MIN_REGRESSION_DOF:
+        raise ValueError(
+            f"regression_summary: need more complete rows (got {n}) for {k} feature(s) "
+            f"+ intercept={intercept} to have positive degrees of freedom"
+        )
+
+    names = (["Intercept"] if intercept else []) + feats
+    feature_matrix = df[feats].to_numpy(dtype=float)
+    x_arr = np.column_stack([np.ones(n), feature_matrix]) if intercept else feature_matrix
+    beta, se, t_stat, p_value = _ols_fit(x_arr, df[target].to_numpy(dtype=float), dof)
+
+    rows = [
+        {"field": name, "coef": float(b), "std_err": float(s), "t_stat": float(t), "p_value": float(p)}
+        for name, b, s, t, p in zip(names, beta, se, t_stat, p_value, strict=True)
+    ]
+    return _table(["field", "coef", "std_err", "t_stat", "p_value"], rows)
+
+
 @_op()
 async def pct_change(table: Table, column: str, name: str | None = None) -> Table:
     """Row-over-row percent change of a numeric ``column`` (adds ``{column}_pct_change``)."""
@@ -1039,10 +1146,12 @@ def _require_sklearn() -> None:
         raise ValueError("ML operators need scikit-learn, which is a base dependency of vibe.") from exc
 
 
-def _encode_features(x_df: Any, encode: str) -> Any:
+def _encode_features(x_df: Any, encode: str, drop_first: bool = False) -> Any:
     """Encode an X frame for an estimator. ``onehot`` → ``pd.get_dummies`` (categoricals only;
-    numerics pass through). ``label`` → integer codes (sorted category) for object columns only,
-    numerics untouched — so a question that "label-encodes the features" is reproduced.
+    numerics pass through; ``drop_first`` drops the first category per feature to avoid the
+    dummy-variable trap — not a no-op for L2-regularized models). ``label`` → integer codes
+    (sorted category) for object columns only, numerics untouched — so a question that
+    "label-encodes the features" is reproduced.
     """
     import pandas as pd
 
@@ -1054,29 +1163,42 @@ def _encode_features(x_df: Any, encode: str) -> Any:
                 out[col] = out[col].map({c: i for i, c in enumerate(cats)})
         return out
     if encode == "onehot":
-        return pd.get_dummies(x_df)
+        return pd.get_dummies(x_df, drop_first=drop_first)
     raise ValueError(f"ml: encode must be onehot/label, got {encode!r}")
 
 
-def _ml_xy(table: Table, target: str, features: list[str], encode: str = "onehot") -> tuple[Any, Any]:
-    """Build (X, y): encode categorical features (``encode`` ∈ onehot|label), drop rows with any
-    missing value.
+def _ml_xy(
+    table: Table, target: str, features: list[str], encode: str = "onehot", drop_first: bool = False
+) -> tuple[Any, Any, str | None]:
+    """Build (X, y, note): encode categorical features (``encode`` ∈ onehot|label), drop rows with
+    any missing value in target/features. ``note`` describes how many rows (and which columns) were
+    dropped, or ``None`` if nothing was — surfaced back to the agent via the result's schema line so
+    silent data loss isn't invisible.
     """
     feats = _cols(features)
     if not feats:
         raise ValueError("ml: `features` must list at least one column")
     _need(table, target, *feats)
-    df = _to_df(table)[[*feats, target]].dropna()
+    full = _to_df(table)[[*feats, target]]
+    df = full.dropna()
     if len(df) <= 1:
         raise ValueError("ml: need at least 2 complete rows after dropping missing values")
-    return _encode_features(df[feats], encode), df[target]
+    note = None
+    dropped = len(full) - len(df)
+    if dropped:
+        missing_cols = [c for c in full.columns if full[c].isna().any()]
+        note = f"dropped {dropped}/{len(full)} row(s) with a missing value in {missing_cols}"
+    return _encode_features(df[feats], encode, drop_first=drop_first), df[target], note
 
 
-def _score_table(value: float) -> Table:
+def _score_table(value: float, notes: list[str] | None = None) -> Table:
     """A 1×1 ``score`` table — kept at full precision; ``answer(decimals=…)`` does the rounding."""
     import pandas as pd
 
-    return _from_df(pd.DataFrame([{"score": float(value)}]))
+    t = _from_df(pd.DataFrame([{"score": float(value)}]))
+    if notes:
+        t.notes = notes
+    return t
 
 
 # scikit-learn estimators keyed by short name. Each entry is a thunk (built only when selected), and
@@ -1101,7 +1223,18 @@ def _reg_models(random_state: int) -> dict[str, Any]:
     }
 
 
-def _clf_models(random_state: int) -> dict[str, Any]:
+# Models whose sklearn constructor accepts `class_weight` — validated against in ml_classification
+# before this dict is even built, so an unsupported combination raises a clear error rather than
+# silently ignoring the request or letting sklearn raise an opaque TypeError.
+_CLF_CLASS_WEIGHT_MODELS = frozenset({"logreg", "tree", "rf", "svc"})
+
+
+def _clf_models(
+    random_state: int,
+    class_weight: str | None = None,
+    solver: str | None = None,
+    max_iter: int = 100,
+) -> dict[str, Any]:
     from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
     from sklearn.linear_model import LogisticRegression
     from sklearn.naive_bayes import GaussianNB
@@ -1109,13 +1242,19 @@ def _clf_models(random_state: int) -> dict[str, Any]:
     from sklearn.svm import SVC
     from sklearn.tree import DecisionTreeClassifier
 
+    logreg_kwargs: dict[str, Any] = {
+        "max_iter": max_iter, "random_state": random_state, "class_weight": class_weight,
+    }
+    if solver is not None:
+        logreg_kwargs["solver"] = solver
+
     return {
-        "logreg": lambda: LogisticRegression(max_iter=1000, random_state=random_state),
-        "tree": lambda: DecisionTreeClassifier(random_state=random_state),
-        "rf": lambda: RandomForestClassifier(random_state=random_state),
+        "logreg": lambda: LogisticRegression(**logreg_kwargs),
+        "tree": lambda: DecisionTreeClassifier(random_state=random_state, class_weight=class_weight),
+        "rf": lambda: RandomForestClassifier(random_state=random_state, class_weight=class_weight),
         "gbm": lambda: GradientBoostingClassifier(random_state=random_state),
         "knn": lambda: KNeighborsClassifier(),
-        "svc": lambda: SVC(random_state=random_state),
+        "svc": lambda: SVC(random_state=random_state, class_weight=class_weight),
         "nb": lambda: GaussianNB(),
     }
 
@@ -1212,14 +1351,17 @@ async def ml_regression(  # noqa: PLR0913, PLR0917 (typed ML knobs; executor bin
     scale: bool = False,
     cv_folds: int = _CV_FOLDS,
     encode: Literal["onehot", "label"] = "onehot",
+    drop_first: bool = False,
 ) -> Table:
     """Fit a regression model and return a 1×1 ``score`` table (reproduces scikit-learn defaults).
     ``evaluate``: ``holdout`` (train/test split, score on test), ``full`` (fit on all rows, score on
     the same — use when a question states no split), ``cv`` (k-fold mean). Set ``random_state`` /
     ``test_size`` to match the question; ``scale`` standardizes features (fit on train) for knn/svr.
     model ∈ linear|ridge|lasso|tree|rf|gbr|knn|svr; metric ∈ r2|rmse|mse|mae|mape. End with
-    ``answer(decimals=…)`` at the asked precision. Categorical features one-hot encoded, missing rows
-    dropped. Deterministic for a given ``random_state``.
+    ``answer(decimals=…)`` at the asked precision. Categorical features one-hot encoded (``drop_first``
+    to drop the baseline category per feature, matching a reference that avoids the dummy-variable
+    trap), missing rows dropped (count/columns reported in the result's ``notes``, if any).
+    Deterministic for a given ``random_state``.
     """
     _require_sklearn()
     import pandas as pd
@@ -1227,14 +1369,14 @@ async def ml_regression(  # noqa: PLR0913, PLR0917 (typed ML knobs; executor bin
     models = _reg_models(random_state)
     if model not in models:
         raise ValueError(f"ml_regression: model must be one of {sorted(models)}, got {model!r}")
-    x, y = _ml_xy(table, target, features, encode=encode)
+    x, y, note = _ml_xy(table, target, features, encode=encode, drop_first=drop_first)
     y = pd.to_numeric(y, errors="coerce")
     score = _evaluate_estimator(
         models[model], x, y, evaluate=evaluate, scorer=_reg_scorer(metric),
         cv_scoring=_REG_CV_SCORING[metric], test_size=test_size, random_state=random_state,
         scale=scale, cv_folds=cv_folds,
     )
-    return _score_table(score)
+    return _score_table(score, notes=[note] if note else None)
 
 
 @_op()
@@ -1250,27 +1392,42 @@ async def ml_classification(  # noqa: PLR0913, PLR0917 (typed ML knobs; executor
     scale: bool = False,
     cv_folds: int = _CV_FOLDS,
     encode: Literal["onehot", "label"] = "onehot",
+    class_weight: Literal["balanced"] | None = None,
+    solver: Literal["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"] | None = None,
+    max_iter: int = 100,
+    drop_first: bool = False,
 ) -> Table:
     """Fit a classifier and return a 1×1 ``score`` table (reproduces scikit-learn defaults).
     ``evaluate``: ``holdout`` (train/test split, score on test), ``full`` (fit + score on all rows),
     ``cv`` (k-fold mean). Set ``random_state`` / ``test_size`` to match the question; ``scale``
     standardizes features (fit on train) for knn/svc. model ∈ logreg|tree|rf|gbm|knn|svc|nb;
-    metric ∈ accuracy|f1|precision|recall (f1/precision/recall are weighted). End with
-    ``answer(decimals=…)``. Categorical features one-hot encoded, missing rows dropped. Deterministic
-    for a given ``random_state``.
+    metric ∈ accuracy|f1|precision|recall (f1/precision/recall are weighted). ``class_weight="balanced"``
+    (logreg/tree/rf/svc only) and ``solver`` (logreg only) pass straight through to the underlying
+    sklearn estimator when the question asks for them; ``max_iter`` defaults to sklearn's own default
+    (100). End with ``answer(decimals=…)``. Categorical features one-hot encoded (``drop_first`` to
+    drop the baseline category per feature), missing rows dropped (count/columns reported in the
+    result's ``notes``, if any). Deterministic for a given ``random_state``.
     """
     _require_sklearn()
 
-    models = _clf_models(random_state)
+    if class_weight is not None and model not in _CLF_CLASS_WEIGHT_MODELS:
+        raise ValueError(
+            f"ml_classification: class_weight is not supported for model={model!r}; "
+            f"supported models: {sorted(_CLF_CLASS_WEIGHT_MODELS)}"
+        )
+    if solver is not None and model != "logreg":
+        raise ValueError(f"ml_classification: solver is only supported for model='logreg', got model={model!r}")
+
+    models = _clf_models(random_state, class_weight=class_weight, solver=solver, max_iter=max_iter)
     if model not in models:
         raise ValueError(f"ml_classification: model must be one of {sorted(models)}, got {model!r}")
-    x, y = _ml_xy(table, target, features, encode=encode)
+    x, y, note = _ml_xy(table, target, features, encode=encode, drop_first=drop_first)
     score = _evaluate_estimator(
         models[model], x, y, evaluate=evaluate, scorer=_clf_scorer(metric),
         cv_scoring=_CLF_CV_SCORING[metric], test_size=test_size, random_state=random_state,
         scale=scale, cv_folds=cv_folds,
     )
-    return _score_table(score)
+    return _score_table(score, notes=[note] if note else None)
 
 
 @_op()
@@ -1281,10 +1438,11 @@ async def ml_cluster(
     metric: Literal["silhouette", "inertia"] = "silhouette",
     random_state: int = _ML_RANDOM_STATE,
     encode: Literal["onehot", "label"] = "onehot",
+    drop_first: bool = False,
 ) -> Table:
-    """K-means over ``features`` (categoricals encoded per ``encode``, missing rows dropped) — a 1×1
-    table (``score``): ``silhouette`` (cohesion/separation, higher is better) or ``inertia``.
-    Deterministic for a given ``random_state``.
+    """K-means over ``features`` (categoricals encoded per ``encode``, ``drop_first`` to drop the
+    baseline category per feature, missing rows dropped) — a 1×1 table (``score``): ``silhouette``
+    (cohesion/separation, higher is better) or ``inertia``. Deterministic for a given ``random_state``.
     """
     _require_sklearn()
     from sklearn.cluster import KMeans
@@ -1294,7 +1452,7 @@ async def ml_cluster(
         raise ValueError(f"ml_cluster: metric must be silhouette/inertia, got {metric!r}")
     feats = _cols(features)
     _need(table, *feats)
-    x = _encode_features(_to_df(table)[feats].dropna(), encode)
+    x = _encode_features(_to_df(table)[feats].dropna(), encode, drop_first=drop_first)
     if len(x) <= k:
         raise ValueError(f"ml_cluster: need more rows ({len(x)}) than clusters (k={k})")
     km = KMeans(n_clusters=k, random_state=random_state, n_init=10).fit(x)
@@ -1330,11 +1488,13 @@ async def feature_importance(
     task: Literal["auto", "classification", "regression"] = "auto",
     random_state: int = _ML_RANDOM_STATE,
     encode: Literal["onehot", "label"] = "onehot",
+    drop_first: bool = False,
 ) -> Table:
     """Rank ``features`` by how much they predict ``target`` — a table of ``field, importance``
     (descending). rf/tree use impurity importances, linear/logreg use ``|coef|``. ``task=auto``
     infers regression for a numeric target, else classification. One-hot columns are summed back to
-    their source feature, so the ranking is by the columns you named. Deterministic for ``random_state``.
+    their source feature, so the ranking is by the columns you named (``drop_first`` drops the
+    baseline category per feature before summing). Deterministic for ``random_state``.
     """
     _require_sklearn()
     import numpy as np
@@ -1342,7 +1502,7 @@ async def feature_importance(
 
     feats = _cols(features)
     resolved = task if task != "auto" else ("regression" if _column_is_numeric(table, target) else "classification")
-    x, y = _ml_xy(table, target, feats, encode=encode)
+    x, y, note = _ml_xy(table, target, feats, encode=encode, drop_first=drop_first)
     y_fit = pd.to_numeric(y, errors="coerce") if resolved == "regression" else y.astype("str")
     est = _fi_estimator(model, resolved, random_state)
     est.fit(x, y_fit)
@@ -1362,7 +1522,10 @@ async def feature_importance(
         key=lambda r: r["importance"],
         reverse=True,
     )
-    return _table(["field", "importance"], rows)
+    result = _table(["field", "importance"], rows)
+    if note:
+        result.notes = [note]
+    return result
 
 
 @_op()
@@ -1381,12 +1544,14 @@ async def ml_predict(  # noqa: PLR0914, PLR0913, PLR0917 (typed ML knobs; execut
     random_state: int = _ML_RANDOM_STATE,
     scale: bool = False,
     encode: Literal["onehot", "label"] = "onehot",
+    drop_first: bool = False,
 ) -> Table:
     """Fit a model and return **per-row predictions** — a table of ``[*features, target, {target}_pred]``.
     ``evaluate`` fits on the train split (``holdout``) or all rows (``full``); ``on`` predicts the held-out
     ``test`` rows or ``all`` rows. Use for "predict …" questions, then ``filter_rows``/``answer`` to read a
     value. model must match ``task`` (regression: linear|ridge|lasso|tree|rf|gbr|knn|svr; classification:
-    logreg|tree|rf|gbm|knn|svc|nb). Categorical features encoded per ``encode``, missing rows dropped.
+    logreg|tree|rf|gbm|knn|svc|nb). Categorical features encoded per ``encode`` (``drop_first`` to drop
+    the baseline category per feature), missing rows dropped.
     """
     _require_sklearn()
     import pandas as pd
@@ -1404,7 +1569,7 @@ async def ml_predict(  # noqa: PLR0914, PLR0913, PLR0917 (typed ML knobs; execut
     df = _to_df(table)[[*feats, target]].dropna()
     if len(df) <= 1:
         raise ValueError("ml_predict: need at least 2 complete rows after dropping missing values")
-    x = _encode_features(df[feats], encode)
+    x = _encode_features(df[feats], encode, drop_first=drop_first)
     y = pd.to_numeric(df[target], errors="coerce") if task == "regression" else df[target]
 
     if evaluate == "full":

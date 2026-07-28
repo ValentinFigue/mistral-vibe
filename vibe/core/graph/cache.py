@@ -36,7 +36,11 @@ from vibe.core.logger import logger
 # (the recipe fingerprint does not capture operator code version). Baked into the shared filename.
 # v2: `describe` output gained median/p25/p75 columns.
 # v3: `describe`/`correlation` label column renamed `column` → `field` (reserved-word fix).
-CACHE_VERSION = 4
+# v4: ML op semantics + param names changed (evaluate/scale/encode, ml_predict added).
+# v5: `_coerce_column` recognizes standard NA tokens (not just ''); `filter_rows` gained
+#     is_null/is_not_null; `ml_classification` gained class_weight/solver, fixed max_iter
+#     default; one-hot encoding gained drop_first.
+CACHE_VERSION = 5
 
 # Soft byte budget for the shared store. Enforced once per authoring run (not per put), so old
 # results are trimmed as new analyses accumulate across sessions. A cap, not a hard limit.

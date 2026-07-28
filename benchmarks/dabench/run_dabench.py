@@ -70,6 +70,18 @@ def is_successful(record: dict | None) -> bool:
     return bool(record) and bool(record.get("response"))
 
 
+def classify_failure(stdout: str, stderr: str) -> str:
+    """Categorize why a question failed, matching vibe's middleware stop-reason strings
+    (vibe/core/middleware.py) so future runs are analyzable without live-pasted stderr.
+    """
+    combined = f"{stdout}\n{stderr}"
+    if "Turn limit of" in combined:
+        return "turn_limit_exceeded"
+    if "Price limit exceeded" in combined:
+        return "price_limit_exceeded"
+    return "nonzero_exit"
+
+
 def already_done(qid: int, existing: dict[int, dict], skip_failed: bool) -> bool:
     if skip_failed:
         return qid in existing
@@ -156,13 +168,14 @@ def run_one(
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=vibe_env())
         elapsed = time.monotonic() - start
         if result.returncode != 0:
-            print(f"[dabench] id={qid} FAILED ({elapsed:.1f}s): {result.stderr.strip()[-500:]}", file=sys.stderr)
-            return {"id": qid, "response": ""}
+            error = classify_failure(result.stdout, result.stderr)
+            print(f"[dabench] id={qid} FAILED [{error}] ({elapsed:.1f}s): {result.stderr.strip()[-500:]}", file=sys.stderr)
+            return {"id": qid, "response": "", "error": error}
         print(f"[dabench] id={qid} ok ({elapsed:.1f}s)", file=sys.stderr)
         return {"id": qid, "response": result.stdout.strip()}
     except subprocess.TimeoutExpired:
         print(f"[dabench] id={qid} TIMEOUT after {timeout}s", file=sys.stderr)
-        return {"id": qid, "response": ""}
+        return {"id": qid, "response": "", "error": "timeout"}
     finally:
         if not keep_tmp:
             shutil.rmtree(tmp_dir, ignore_errors=True)
